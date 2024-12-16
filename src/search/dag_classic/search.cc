@@ -1016,6 +1016,18 @@ inline float ComputeCpuct(const SearchParams& params, uint32_t N,
   const float base = params.GetCpuctBase(is_root_node);
   return init + (k ? k * FastLog((N + base) / base) : 0.0f);
 }
+
+inline float ComputePolicyDecayFactor(const SearchParams& params, uint32_t N) {
+  const float exponent = params.GetPolicyDecayExponent();
+  const float proportionality_factor = params.GetPolicyDecayFactor();
+  return (exponent == 0.0f || proportionality_factor == 0.0f)
+             ? 1.0f
+             : FastExp(-FastLog(1.0f + proportionality_factor * N) * exponent);
+}
+
+inline float ComputePolicyDecay(const float factor, const float pol) {
+  return factor == 1.0f ? pol : pol / (pol + (1.0f - pol) * factor);
+}
 }  // namespace
 
 // Ignore the last tuple element when sorting in GetVerboseStats
@@ -2231,6 +2243,7 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
       // Compiler can overwrite these stack variables if there is recursion to a
       // task.
       // This 1 is 'filled pre-emptively'.
+      std::array<float, kMaxMovesInPosition> current_pol;
       std::array<float, kMaxMovesInPosition> current_util;
 
       // These 3 are 'filled on demand'.
@@ -2257,10 +2270,17 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
       const float draw_score =
           (full_path.size() % 2 == 0) ? odd_draw_score : even_draw_score;
       m_evaluator.SetParent(node);
+      // Store the policy decay factor here since it is only dependent on the
+      // visit count of node and not of children.
+      const float policy_decay_factor =
+          ComputePolicyDecayFactor(params_, node->GetN());
       float visited_pol = 0.0f;
       for (Node* child : node->VisitedNodes()) {
         int index = child->Index();
         visited_pol += child->GetP();
+        // Apply policy decay and store the value.
+        current_pol[index] = ComputePolicyDecay(policy_decay_factor,
+                                                child->GetP());
         float q = child->GetQ(draw_score);
         current_util[index] = q + m_evaluator.GetMUtility(child, q);
       }
@@ -2269,6 +2289,7 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
       for (int i = 0; i < max_needed; i++) {
         if (current_util[i] == std::numeric_limits<float>::lowest()) {
           current_util[i] = fpu + m_evaluator.GetDefaultMUtility();
+          current_pol[i] = node->GetLowNode()->GetEdges()[i].GetP();
         }
       }
 
@@ -2302,7 +2323,7 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
           const float util = current_util[idx];
           if (idx > cache_filled_idx) {
             current_score[idx] =
-                cur_iters[idx].GetP() * puct_mult / (1 + nstarted) + util;
+                current_pol[idx] * puct_mult / (1 + nstarted) + util;
             cache_filled_idx++;
           }
           if (is_root_node) {
@@ -2350,7 +2371,7 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
           if (best_without_u < second_best) {
             const auto n1 = current_nstarted[best_idx] + 1;
             estimated_visits_to_change_best = static_cast<int>(
-                std::max(1.0f, std::min(cur_iters[best_idx].GetP() * puct_mult /
+                std::max(1.0f, std::min(current_pol[best_idx] * puct_mult /
                                                 (second_best - best_without_u) -
                                             n1 + 1,
                                         1e9f)));
@@ -2379,7 +2400,7 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
           Node* child_node = best_edge.GetOrSpawnNode(/* parent */ node);
           child_node->IncrementNInFlight(new_visits);
           current_nstarted[best_idx] += new_visits;
-          current_score[best_idx] = cur_iters[best_idx].GetP() * puct_mult /
+          current_score[best_idx] = current_pol[best_idx] * puct_mult /
                                         (1 + current_nstarted[best_idx]) +
                                     current_util[best_idx];
           continue;

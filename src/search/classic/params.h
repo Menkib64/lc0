@@ -93,6 +93,8 @@ class BaseSearchParams {
   }
   int GetCacheHistoryLength() const { return kCacheHistoryLength; }
   float GetPolicySoftmaxTemp() const { return kPolicySoftmaxTemp; }
+  float GetPolicyDecayExponent() const { return kPolicyDecayExponent; }
+  float GetPolicyDecayFactor() const { return kPolicyDecayFactor; }
   int GetMaxCollisionEvents() const { return kMaxCollisionEvents; }
   int GetMaxCollisionVisits() const { return kMaxCollisionVisits; }
   bool GetOutOfOrderEval() const { return kOutOfOrderEval; }
@@ -189,6 +191,8 @@ class BaseSearchParams {
   static const OptionId kFpuStrategyAtRootId;
   static const OptionId kFpuValueAtRootId;
   static const OptionId kCacheHistoryLengthId;
+  static const OptionId kPolicyDecayExponentId;
+  static const OptionId kPolicyDecayFactorId;
   static const OptionId kMaxCollisionEventsId;
   static const OptionId kMaxCollisionVisitsId;
   static const OptionId kOutOfOrderEvalId;
@@ -257,6 +261,8 @@ class BaseSearchParams {
   const float kFpuValueAtRoot;
   const int kCacheHistoryLength;
   const float kPolicySoftmaxTemp;
+  const float kPolicyDecayExponent;
+  const float kPolicyDecayFactor;
   const int kMaxCollisionEvents;
   const int kMaxCollisionVisits;
   const bool kOutOfOrderEval;
