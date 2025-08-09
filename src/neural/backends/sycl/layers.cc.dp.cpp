@@ -76,10 +76,10 @@ namespace sycldnn_backend {
 template <typename DataType>
 BaseLayer<DataType>::BaseLayer(int c, int h, int w, BaseLayer* ip, sycl::queue& sycl_queue)
     : input_(ip),
+      sycl_queue_(sycl_queue),
       C(c),
       H(h),
-      W(w),
-      sycl_queue_(sycl_queue) {}
+      W(w) {}
 
 template <typename DataType>
 SELayer<DataType>::SELayer(BaseLayer<DataType>* ip, int fc1Outputs,
@@ -1535,11 +1535,11 @@ EncoderBlock<DataType>::EncoderBlock(
     : embedding_op_size_(size),
       encoder_heads_(heads),
       alpha_(alpha),
+      default_eps_(default_eps),
       has_smolgen_(cpu_weights.mha.has_smolgen),
       smolgen_activation_(smolgen_act),
       ffn_activation_(ffn_act),
       max_batch_size_(max_batch_size),
-      default_eps_(default_eps),
       sycl_queue_(sycl_queue) {
   mha_q_size_ = cpu_weights.mha.q_b.size();
   mha_k_size_ = cpu_weights.mha.k_b.size();
@@ -2293,6 +2293,7 @@ AttentionBody<DataType>::AttentionBody(const MultiHeadWeights& weights,
                                        bool is_pe_dense_embedding,
                                        sycl::queue &sycl_queue)
     : BaseLayer<DataType>(weights.ip_emb_b.size(), 8, 8, nullptr, sycl_queue),
+      is_pe_dense_embedding_(is_pe_dense_embedding),
       embedding_op_size_(weights.ip_emb_b.size()),
       encoder_head_count_(weights.encoder_head_count),
       activations_(activations),
@@ -2300,8 +2301,7 @@ AttentionBody<DataType>::AttentionBody(const MultiHeadWeights& weights,
       input_c_(input_c),
       has_gating_(weights.ip_mult_gate.size() > 0 &&
                   weights.ip_add_gate.size() > 0),
-      has_smolgen_(weights.has_smolgen),
-      is_pe_dense_embedding_(is_pe_dense_embedding) {
+      has_smolgen_(weights.has_smolgen) {
   allocAndUpload<DataType>(&ip_emb_w_, weights.ip_emb_w, scratch, sycl_queue_);
   allocAndUpload<DataType>(&ip_emb_b_, weights.ip_emb_b, scratch, sycl_queue_);
 
@@ -2555,12 +2555,12 @@ ValueHead<DataType>::ValueHead(BaseLayer<DataType>* ip,
                                ActivationFunction act, int max_batch_size,
                                sycl::queue &sycl_queue)
     : BaseLayer<DataType>(weights.ip_val_b.size(), 8, 8, ip, sycl_queue),
-      attention_body_(attention_body),
       embedding_size_(attention_body ? weights.ip_val_b.size()
                                      : weights.value.biases.size()),
       value_hidden_size_(weights.ip1_val_b.size()),
-      act_(act),
-      wdl_(wdl) {
+      wdl_(wdl),
+      attention_body_(attention_body),
+      act_(act) {
   if (attention_body_) {
     allocAndUpload<DataType>(&ip_val_w_, weights.ip_val_w, scratch, sycl_queue);
     allocAndUpload<DataType>(&ip_val_b_, weights.ip_val_b, scratch, sycl_queue);
