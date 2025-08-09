@@ -207,8 +207,8 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
 
   sycl_queue.submit([&](sycl::handler &cgh) {
         //auto d_A = b_A.get_access<sycl::access::mode::read_write>(cgh);
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+
+        cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
         cublasSetStream(handle, cudaStreamHandle);  
@@ -249,9 +249,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
 
   #ifdef USE_CUBLAS
   sycl_queue.submit([&](sycl::handler &cgh) {
-        
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+        cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
         cublasSetStream(handle, cudaStreamHandle);  
@@ -265,8 +263,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
 
   #elif defined(USE_HIPBLAS)
   sycl_queue.submit([&](sycl::handler &cgh) {
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+      cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
         hipblasSetStream(handle, hipStreamHandle);  
@@ -331,7 +328,7 @@ void SELayer<sycl::half>::Eval(int N, sycl::half* output, const sycl::half* inpu
 
   sycl_queue.submit([&](sycl::handler &cgh) {
 
-      cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+      cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
       auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
       cublasSetStream(handle, cudaStreamHandle);
@@ -372,7 +369,7 @@ void SELayer<sycl::half>::Eval(int N, sycl::half* output, const sycl::half* inpu
 
   sycl_queue_.submit([&](sycl::handler &cgh) {
 
-      cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+      cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
       auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
       cublasSetStream(handle, cudaStreamHandle);
@@ -503,8 +500,7 @@ template <>
     cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
 
     sycl_queue.submit([&](sycl::handler &cgh) {
-        
-         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+         cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
          auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
          cublasSetStream(handle, cudaStreamHandle);    
@@ -519,7 +515,7 @@ template <>
 #elif defined(USE_HIPBLAS)
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
   sycl_queue.submit([&](sycl::handler &cgh) {
-    cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+    cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
       auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
       hipblasSetStream(handle, hipStreamHandle);
 
@@ -562,8 +558,7 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
   cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
 
   sycl_queue.submit([&](sycl::handler &cgh) {
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+        cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
         cublasSetStream(handle, cudaStreamHandle);    
@@ -579,7 +574,7 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
   #elif defined(USE_HIPBLAS)
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
   sycl_queue.submit([&](sycl::handler &cgh) {
-      cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+      cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
         hipblasSetStream(handle, hipStreamHandle);    
