@@ -45,10 +45,7 @@ class BaseLayer {
   int GetW() const { return W; }
   sycl::queue GetSycl_Queue() { return sycl_queue_;}
 
-  bool isNHWC() const { return nhwc_; }
-
   BaseLayer(int c, int h, int w, BaseLayer* ip, sycl::queue& sycl_queue);
-  BaseLayer(int c, int h, int w, BaseLayer* ip, bool nhwc, sycl::queue& sycl_queue);
   virtual ~BaseLayer() = default;
   size_t GetOutputSize(int N) const { return sizeof(DataType) * N * C * H * W; }
 
@@ -70,8 +67,6 @@ class BaseLayer {
   int H;
   int W;
 
-  bool nhwc_;  // tensor layout
-
   void cublasRowMajorMatrixMul(const DataType* A, const DataType* B,
                                DataType* Out, int M, int N, int K,
                                int batchSize, sycl::queue &sycl_queue);
@@ -79,7 +74,6 @@ class BaseLayer {
 
 template <typename DataType>
 class FCLayer : public BaseLayer<DataType> {
-  using BaseLayer<DataType>::nhwc_;
   using BaseLayer<DataType>::sycl_queue_;
 
  public:
@@ -106,7 +100,6 @@ class FCLayer : public BaseLayer<DataType> {
 
 template <typename DataType>
 class PolicyMapLayer : public BaseLayer<DataType> {
-  using BaseLayer<DataType>::nhwc_;
   using BaseLayer<DataType>::sycl_queue_;
 
  public:
@@ -134,7 +127,6 @@ class PolicyMapLayer : public BaseLayer<DataType> {
 template <typename DataType>
 class SELayer : public BaseLayer<DataType> {
   using BaseLayer<DataType>::C;
-  using BaseLayer<DataType>::nhwc_;
   using BaseLayer<DataType>::sycl_queue_;
 
  public:
@@ -151,10 +143,8 @@ class SELayer : public BaseLayer<DataType> {
 
  private:
   DataType* w1_ = nullptr;
-  DataType* w1_t_ = nullptr;  // transposed copy used by fused SE kernel
   DataType* b1_ = nullptr;
   DataType* w2_ = nullptr;
-  DataType* w2_t_ = nullptr;
   DataType* b2_ = nullptr;
   DataType* bPrev_ = nullptr;
   int numFc1Out_;
@@ -171,7 +161,6 @@ class FusedWinogradConvSELayer : public BaseLayer<DataType> {
   using BaseLayer<DataType>::GetC;
   using BaseLayer<DataType>::GetH;
   using BaseLayer<DataType>::GetW;
-  using BaseLayer<DataType>::nhwc_;
   using BaseLayer<DataType>::sycl_queue_;
 
  public:
@@ -214,7 +203,6 @@ class Conv1Layer : public BaseLayer<DataType> {
   using BaseLayer<DataType>::GetC;
   using BaseLayer<DataType>::GetH;
   using BaseLayer<DataType>::GetW;
-  using BaseLayer<DataType>::nhwc_;
   using BaseLayer<DataType>::sycl_queue_;
 
  public:

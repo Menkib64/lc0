@@ -73,23 +73,12 @@
 namespace lczero {
 namespace sycldnn_backend {
 
-// Use Single kernel for entire SE operation.
-// Right now supported only for fp16 with nhwc and it's quite a bit faster
-// than using multiple passes. The flag can be set to false for debugging.
-static constexpr bool kUseFusedSELayer = true;
-
-template <typename DataType>
-BaseLayer<DataType>::BaseLayer(int c, int h, int w, BaseLayer* ip, bool nhwc,
-                               sycl::queue& sycl_queue)
-    : input_(ip), C(c), H(h), W(w), nhwc_(nhwc), sycl_queue_(sycl_queue) {}
-
 template <typename DataType>
 BaseLayer<DataType>::BaseLayer(int c, int h, int w, BaseLayer* ip, sycl::queue& sycl_queue)
     : input_(ip),
       C(c),
       H(h),
       W(w),
-      nhwc_(ip ? ip->nhwc_ : false),
       sycl_queue_(sycl_queue) {}
 
 template <typename DataType>
@@ -103,13 +92,6 @@ SELayer<DataType>::SELayer(BaseLayer<DataType>* ip, int fc1Outputs,
                                        sycl_queue_);
   w2_ = (DataType*)sycl::malloc_device(2 * C * numFc1Out_ * sizeof(DataType),
                                        sycl_queue_);
-
-  if (kUseFusedSELayer && nhwc_) {
-    w1_t_ = (DataType*)sycl::malloc_device(C * numFc1Out_ * sizeof(DataType),
-                                           sycl_queue_);
-    w2_t_ = (DataType*)sycl::malloc_device(2 * C * numFc1Out_ * sizeof(DataType),
-                                           sycl_queue_);
-  }
 
   b1_ = (DataType*)sycl::malloc_device(numFc1Out_ * sizeof(DataType),
                                        sycl_queue_);
@@ -175,28 +157,13 @@ void SELayer<sycl::half>::LoadWeights(float* w1, float* b1, float* w2, float* b2
   // Weight for the first FC layer.
  
   sycl_queue_.memcpy(scratch, w1, weight_size1).wait();
-  
-  copyTypeConverted((sycl::half*)w1_, (float*)scratch, (int)num_weights1, sycl_queue_);
 
-  if (kUseFusedSELayer && nhwc_) {
-    // transposed copy for fused SE kernel
-    cpuTranspose(temp.data(), w1, numFc1Out_, C);
-    
-    sycl_queue_.memcpy(scratch, temp.data(), weight_size1).wait();    
-    
-    copyTypeConverted((sycl::half*)w1_t_, (float*)scratch, (int)num_weights1, sycl_queue_);
-  }
+  copyTypeConverted((sycl::half*)w1_, (float*)scratch, (int)num_weights1, sycl_queue_);
 
   // Weight for the second FC layer.
   sycl_queue_.memcpy(scratch, w2, weight_size2).wait();
   
   copyTypeConverted((sycl::half*)w2_, (float*)scratch, (int)num_weights2, sycl_queue_);
-  if (kUseFusedSELayer && nhwc_) {
-    cpuTranspose(temp.data(), w2, 2 * C, numFc1Out_);
-    
-    sycl_queue_.memcpy(scratch, temp.data(), weight_size2).wait();
-    copyTypeConverted((sycl::half*)w2_t_, (float*)scratch, (int)num_weights2, sycl_queue_);
-  }
 
   // Bias for the first FC layer.
     
@@ -230,7 +197,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
 
   // 1. Global avg pooling (also adds previous layer bias before computing
   // averages).
-  globalAvgPool(N, C, op2, input, bPrev_, false, sycl_queue);
+  globalAvgPool(N, C, op2, input, bPrev_, sycl_queue);
 
   // 2. First fully connected layer.
   float alpha = 1.0f, beta = 0.0f;
@@ -321,7 +288,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
 
   // 4. (Optional prev layer bias add), Global scale, residual add, relu and
   // bias.
-  globalScale(N, C, output, input, op2, bPrev_, false, act_, sycl_queue);
+  globalScale(N, C, output, input, op2, bPrev_, act_, sycl_queue);
 
 }
 
@@ -330,129 +297,122 @@ void SELayer<sycl::half>::Eval(int N, sycl::half* output, const sycl::half* inpu
                          const sycl::half* input2, void* scratch, size_t scratch_size, sycl::queue &sycl_queue, sycl::half***) {
   //CERR << "SELayer<sycl::half>::Eval. ";
 
-  bool se_done = false;
-  if (kUseFusedSELayer && nhwc_) {
-    se_done = Se_Fp16_NHWC(N, C, numFc1Out_, output, input2, input, w1_t_, b1_,
-                           w2_t_, b2_, bPrev_, act_, sycl_queue);
-  }
-  if (!se_done) {
-    assert(output == input2);
-    // Ping-pong between 'op1' and 'op2' (parts of scratch memory).
-    sycl::half* op1 = (sycl::half*)scratch;
-    sycl::half* op2 = (sycl::half*)scratch + scratch_size / sizeof(sycl::half) / 2;
+  assert(output == input2);
+  // Ping-pong between 'op1' and 'op2' (parts of scratch memory).
+  sycl::half* op1 = (sycl::half*)scratch;
+  sycl::half* op2 = (sycl::half*)scratch + scratch_size / sizeof(sycl::half) / 2;
 
-    // 1. Global avg pooling (also adds previous layer bias before computing
-    // averages).
-    globalAvgPool(N, C, op2, input, bPrev_, nhwc_, sycl_queue);
+  // 1. Global avg pooling (also adds previous layer bias before computing
+  // averages).
+  globalAvgPool(N, C, op2, input, bPrev_, sycl_queue);
 
-    // 2. First fully connected layer.
-    //half_raw one_h{0x3C00};
-    //half_raw zero_h{0};
+  // 2. First fully connected layer.
+  //half_raw one_h{0x3C00};
+  //half_raw zero_h{0};
 
-    #ifdef USE_CUBLAS
-    __half_raw one_h{0x3C00};
-    __half_raw zero_h{0};
-    half alpha = one_h;
-    half beta = zero_h;
+  #ifdef USE_CUBLAS
+  __half_raw one_h{0x3C00};
+  __half_raw zero_h{0};
+  half alpha = one_h;
+  half beta = zero_h;
 
-    #elif defined(USE_HIPBLAS)
-    hipblasHalf alpha{1};
-    hipblasHalf beta{0};
+  #elif defined(USE_HIPBLAS)
+  hipblasHalf alpha{1};
+  hipblasHalf beta{0};
 
-    #else
-    sycl::half alpha = 1;
-    sycl::half beta = 0;
-    #endif
+  #else
+  sycl::half alpha = 1;
+  sycl::half beta = 0;
+  #endif
 
-    #ifdef USE_CUBLAS
-  
-    cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
+  #ifdef USE_CUBLAS
 
-    sycl_queue.submit([&](sycl::handler &cgh) {
-       
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+  cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
 
-        auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);  
-    
-        ReportCUBLASErrors(cublasHgemm(handle, transpose_type_transpose, transpose_type_notranspose, numFc1Out_,
-                                   N, C, &alpha, ((const half *)w1_), C, ((const half *)op2), C, &beta, ((half *)op1),
-                                   numFc1Out_));
-    
-        });
-    });
+  sycl_queue.submit([&](sycl::handler &cgh) {
 
-#elif defined(USE_HIPBLAS)
-    hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
-
-    sycl_queue.submit([&](sycl::handler &cgh) {
       cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-        auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);
+      auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
+      cublasSetStream(handle, cudaStreamHandle);
 
-        hipblasHgemm(handle, transpose_type_transpose,
-                     transpose_type_notranspose,numFc1Out_, N, C, &alpha,
-                     ((const hipblasHalf *)w1_), C, ((const hipblasHalf *)op2), C,
-                     &beta, ((hipblasHalf *)op1), numFc1Out_);
+      ReportCUBLASErrors(cublasHgemm(handle, transpose_type_transpose, transpose_type_notranspose, numFc1Out_,
+                                 N, C, &alpha, ((const half *)w1_), C, ((const half *)op2), C, &beta, ((half *)op1),
+                                 numFc1Out_));
 
       });
+  });
+
+#elif defined(USE_HIPBLAS)
+  hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
+
+  sycl_queue.submit([&](sycl::handler &cgh) {
+    cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
+      auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
+
+      hipblasSetStream(handle, hipStreamHandle);
+
+      hipblasHgemm(handle, transpose_type_transpose,
+                   transpose_type_notranspose,numFc1Out_, N, C, &alpha,
+                   ((const hipblasHalf *)w1_), C, ((const hipblasHalf *)op2), C,
+                   &beta, ((hipblasHalf *)op1), numFc1Out_);
+
     });
+  });
 #else
-    oneapi::mkl::blas::column_major::gemm(
-        sycl_queue, transpose_type_transpose, transpose_type_notranspose,
-        numFc1Out_, N, C, alpha, ((const sycl::half *)w1_), C,
-        ((const sycl::half *)op2),C, beta, ((sycl::half *)op1), numFc1Out_);
+  oneapi::mkl::blas::column_major::gemm(
+      sycl_queue, transpose_type_transpose, transpose_type_notranspose,
+      numFc1Out_, N, C, alpha, ((const sycl::half *)w1_), C,
+      ((const sycl::half *)op2),C, beta, ((sycl::half *)op1), numFc1Out_);
 #endif
 
-    addVectors(op1, b1_, op1, numFc1Out_ * N, numFc1Out_, numFc1Out_ * N, act_, sycl_queue);
+  addVectors(op1, b1_, op1, numFc1Out_ * N, numFc1Out_, numFc1Out_ * N, act_, sycl_queue);
 
-    #ifdef USE_CUBLAS
+#ifdef USE_CUBLAS
 
-    sycl_queue_.submit([&](sycl::handler &cgh) {
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+  sycl_queue_.submit([&](sycl::handler &cgh) {
 
-        auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);   
-    
-        // 3. Second fully connected layer.
-        ReportCUBLASErrors(cublasHgemm(handle, transpose_type_transpose, transpose_type_notranspose, 2 * C, N,
-                                   numFc1Out_, &alpha, ((const half *)w2_), numFc1Out_, ((const half *)op1),
-                                   numFc1Out_, &beta, ((half *)op2), 2 * C));
-  
-        });
-    });  
-    
-#elif defined(USE_HIPBLAS)
-    sycl_queue.submit([&](sycl::handler &cgh) {
       cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-        auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
-        hipblasSetStream(handle, hipStreamHandle);
 
-        hipblasHgemm(
-            handle, transpose_type_transpose, transpose_type_notranspose, 2 * C,
-            N, numFc1Out_, &alpha,((const hipblasHalf *)w2_), numFc1Out_,
-            ((const hipblasHalf *)op1), numFc1Out_, &beta, ((hipblasHalf *)op2),
-            2 * C);
+      auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
+      cublasSetStream(handle, cudaStreamHandle);
+
+      // 3. Second fully connected layer.
+      ReportCUBLASErrors(cublasHgemm(handle, transpose_type_transpose, transpose_type_notranspose, 2 * C, N,
+                                 numFc1Out_, &alpha, ((const half *)w2_), numFc1Out_, ((const half *)op1),
+                                 numFc1Out_, &beta, ((half *)op2), 2 * C));
 
       });
-    });
-#else
-    oneapi::mkl::blas::column_major::gemm(
-        sycl_queue, transpose_type_transpose, transpose_type_notranspose, 2 * C,
-        N, numFc1Out_, alpha, ((const sycl::half *)w2_), numFc1Out_,
-        ((const sycl::half *)op1), numFc1Out_, beta, ((sycl::half *)op2),
-        2 * C);
-#endif
-    
-    addVectors(op2, b2_, op2, 2 * C * N, 2 * C, 2 * C * N, ACTIVATION_NONE, sycl_queue);
+  });
 
-    // 4. (Optional prev layer bias add), Global scale, residual add, relu and
-    // bias.
-    globalScale(N, C, output, input, op2, bPrev_, nhwc_, act_, sycl_queue);
-  }
-} 
+#elif defined(USE_HIPBLAS)
+  sycl_queue.submit([&](sycl::handler &cgh) {
+    cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
+      auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
+      hipblasSetStream(handle, hipStreamHandle);
+
+      hipblasHgemm(
+          handle, transpose_type_transpose, transpose_type_notranspose, 2 * C,
+          N, numFc1Out_, &alpha,((const hipblasHalf *)w2_), numFc1Out_,
+          ((const hipblasHalf *)op1), numFc1Out_, &beta, ((hipblasHalf *)op2),
+          2 * C);
+
+    });
+  });
+#else
+  oneapi::mkl::blas::column_major::gemm(
+      sycl_queue, transpose_type_transpose, transpose_type_notranspose, 2 * C,
+      N, numFc1Out_, alpha, ((const sycl::half *)w2_), numFc1Out_,
+      ((const sycl::half *)op1), numFc1Out_, beta, ((sycl::half *)op2),
+      2 * C);
+#endif
+
+  addVectors(op2, b2_, op2, 2 * C * N, 2 * C, 2 * C * N, ACTIVATION_NONE, sycl_queue);
+
+  // 4. (Optional prev layer bias add), Global scale, residual add, relu and
+  // bias.
+  globalScale(N, C, output, input, op2, bPrev_, act_, sycl_queue);
+}
 
 template <typename DataType>
 FCLayer<DataType>::FCLayer(BaseLayer<DataType>* ip, int C, int H, int W,
@@ -482,16 +442,9 @@ void FCLayer<sycl::half>::LoadWeights(float* cpuWeight, float* cpuBias,
 
   // also need to convert from fp32 to fp16
   assert(scratch);
-  
-  sycl_queue_.memcpy(scratch, cpuWeight, weight_size).wait();
 
-  if (nhwc_) {
-    convertNCHWtoNHWC((sycl::half*)weights_, (float*)scratch, (int)num_biases,
-                      input_->GetC(), (int)num_biases, input_->GetC(),
-                      input_->GetH(), input_->GetW(), sycl_queue_);
-  } else {
-    copyTypeConverted((sycl::half*)weights_, (float*)scratch, (int)num_weights, sycl_queue_);
-  }
+  sycl_queue_.memcpy(scratch, cpuWeight, weight_size).wait();
+  copyTypeConverted((sycl::half*)weights_, (float*)scratch, (int)num_weights, sycl_queue_);
 
   if (cpuBias) {
     sycl_queue_.memcpy(scratch, cpuBias, bias_size).wait();
@@ -683,72 +636,7 @@ void PolicyMapLayer<DataType>::LoadWeights(const short* cpuWeight,
 
   size_t weight_size = sizeof(short) * used_size_;
 
-  if (nhwc_ && !attention_map_) {
-    // convert CHW to HWC
-    int C = used_size_ / 64;
-    int Cin = this->input_->GetC();
-
-    // C is the no. of channels actually used (typically 73).
-    // Cin the the no. of channels in previous layer (padded up to 80).
-    // Weights of this layer is a mapping to select which output index of the
-    // policy vector (1858 elements) maps to every element of input
-    // tensor (assuming NCHW layout). Note that there are 73x64 valid inputs
-    // (80x64 taking padding), and only 1858 outputs so the mapping isn't
-    // one to one. Only few of the indices point to valid index in policy
-    // vector. Invalid entries are set to -1.
-
-    // In fp16 mode, the tensor layout is NHWC so the weights need to be
-    // adjusted to make them work as intended.
-
-    // This is how the original weights looks like (CHW layout):
-    /*
-               HW (64)
-       ----|-------------|
-           |             |
-           |             |
-    C (73) |             |
-           |             |
-           |             |
-       ------------------|   Cin (80)
-           |  padding    |
-           |-------------|
-    */
-    // The padding is not part of the weights provided (used_size_ is 73 x 64).
-    //
-    // The weights converted to HWC looks like this
-    /*
-                 C (73)
-            |-------------|---|
-            |             | P |
-            |             | a |
-    HW (64) |             | d |
-            |             |   |
-            |             |   |
-            |-----------------|
-                     Cin (80)
-    */
-    // In HWC, because the padding is now part of each row
-    // we need to increase the size of weights to account
-    // for it.
-    // The pad elements point to -1 (invalid output index) and the
-    // same kernel works for both HWC and CHW layouts after used_size_
-    // is updated to include padding (80x64).
-
-    used_size_ = Cin * 64;
-    std::vector<short> convertedWeights(used_size_);
-
-    for (int hw = 0; hw < 64; hw++)
-      for (int c = 0; c < Cin; c++) {
-        if (c < C)
-          convertedWeights[hw * Cin + c] = cpuWeight[c * 64 + hw];
-        else
-          convertedWeights[hw * Cin + c] = -1;
-      }
-    sycl_queue_.memcpy(weights_, convertedWeights.data(),
-                       used_size_ * sizeof(short)).wait();
-  } else {
-    sycl_queue_.memcpy(weights_, cpuWeight, weight_size).wait();
-  }
+  sycl_queue_.memcpy(weights_, cpuWeight, weight_size).wait();
 }
 
 template <typename DataType>
@@ -775,7 +663,7 @@ FusedWinogradConvSELayer<DataType>::FusedWinogradConvSELayer(
     BaseLayer<DataType>* ip, int C, int H, int W, int Cin,
     ActivationFunction activation, bool bias, bool skip_add, bool se, int se_k,
     sycl::queue &sycl_queue, bool op_nhcw)
-    : BaseLayer<DataType>(C, H, W, ip, false, sycl_queue),
+    : BaseLayer<DataType>(C, H, W, ip, sycl_queue),
       c_input_(Cin),
       act_(activation),
       use_bias_(bias),
@@ -1102,7 +990,7 @@ template <typename DataType>
 Conv1Layer<DataType>::Conv1Layer(BaseLayer<DataType>* ip, int C, int H, int W,
                                  int Cin, ActivationFunction activation,
                                  bool bias, sycl::queue& sycl_queue)
-    : BaseLayer<DataType>(C, H, W, ip, false, sycl_queue),
+    : BaseLayer<DataType>(C, H, W, ip, sycl_queue),
       c_input_(Cin),
       act_(activation),
       use_bias_(bias) {
@@ -1297,7 +1185,7 @@ ResidualBlock<DataType>::ResidualBlock(BaseLayer<DataType>* ip, int C, bool se,
                                        int se_k, bool first,
                                        bool last, ActivationFunction activation,
                                        int shared_mem_size, sycl::queue& sycl_queue)
-    : BaseLayer<DataType>(C, 8, 8, ip, ip->isNHWC(), sycl_queue),
+    : BaseLayer<DataType>(C, 8, 8, ip, sycl_queue),
       has_se_(se),
       se_k_(se_k),
       c_input_(C),

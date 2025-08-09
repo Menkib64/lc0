@@ -85,21 +85,13 @@ void expandPlanes_Fp16_NCHW(sycl::half* output, const uint64_t* masks,
 // Perform global avg pool.
 template <typename T>
 void globalAvgPool(int N, int C, T* output, const T* input,
-                   const T* prevLayerBias, bool nhwc, sycl::queue &sycl_queue);
+                   const T* prevLayerBias, sycl::queue &sycl_queue);
 
 // Perform global scale.
 template <typename T>
 void globalScale(int N, int C, T* output, const T* input, const T* scaleBias,
-                 const T* prevLayerBias, bool nhwc,
+                 const T* prevLayerBias,
                  ActivationFunction activation, sycl::queue &sycl_queue);
-
-// Perform Squeeze-and-Excitation (SE) in a single fused kernel.
-// Returns false if the fused kernel can't handle the sizes.
-bool Se_Fp16_NHWC(int N, int C, int numFc1Out, sycl::half* output,
-                  const sycl::half* skip, const sycl::half* input,
-                  const sycl::half* w1, const sycl::half* b1,
-                  const sycl::half* w2, const sycl::half* b2,
-                  const sycl::half* bPrev, ActivationFunction activation, sycl::queue &sycl_queue);
 
 template <typename T>
 void PolicyMap(int N, T* output, const T* input, const short* indices,

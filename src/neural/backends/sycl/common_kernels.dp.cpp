@@ -785,69 +785,6 @@ void globalScale_kernel(T* output, const T* input,
   output[tid] = (T)op;
 }
 
-void globalScale_kernel_fp16_nhwc(sycl::half* output, const sycl::half* input,
-                                  const sycl::half* scaleBias,
-                                  const sycl::half* prevLayerBias,
-                                  int inputSize, int C, int HWC,
-                                  ActivationFunction activation,
-                                  const sycl::nd_item<3>& item_ct1) {
-  int tid = item_ct1.get_group(2) * item_ct1.get_local_range(2) +
-            item_ct1.get_local_id(2);
-
-  if (tid > inputSize) return;
-
-  int c = tid % C;
-  int n = tid / (HWC);
-
-  float val1 = (float)input[tid];   // Output of residual block to be scaled.
-  float val2 = (float)output[tid];  // Skip connection to be added directly.
-  if (prevLayerBias) {
-    val1 += (float)prevLayerBias[c];
-  }
-
-  int startIdx = n * 2 * C;  // Scale and bias interleaved.
-
-  float s = scaleBias[startIdx + c];
-  s = 1.0f / (1.0f + sycl::exp(-s));  // Sigmoid on scale.
-
-  float b = scaleBias[startIdx + c + C];
-
-  float op = val1 * s + val2 + b;
-  op = activate(op, activation);
-
-  output[tid] = (sycl::half)op;
-}
-
-// N blocks.
-// C threads per block.
-// 'HWC' input data processed by thread block.
-// Each thread writes a single output.
-void globalAvgPool_kernel_NHWC_fp16(sycl::half* output, const sycl::half* input,
-                                    const sycl::half* prevLayerBias,
-                                    int inputSize, int outputSize,
-                                    const sycl::nd_item<3>& item_ct1) {
-  const int elementsPerThread = 64;  // 8x8 board.
-
-  int blockStart = item_ct1.get_group(2) * item_ct1.get_local_range(2);
-
-  float S = 0;
-
-#pragma unroll
-  for (int i = 0; i < elementsPerThread; i++) {
-    int localIndex = i * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
-    int inputIndex = blockStart * elementsPerThread + localIndex;
-    if (inputIndex < inputSize) S += (float)(input[inputIndex]);
-  }
-
-  float avg = S / elementsPerThread;
-
-  // Add bias from previous layer.
-  if (prevLayerBias) avg += (float)(prevLayerBias[item_ct1.get_local_id(2)]);
-
-  int opIndex = blockStart + item_ct1.get_local_id(2);
-  if (opIndex < outputSize) output[opIndex] = (sycl::half)avg;
-}
-
 // Each thread reads 2 inputs (8x8/32), and each warp writes a single output.
 template <typename T>
 void globalAvgPool_kernel(T* output, const T* input,
@@ -898,54 +835,30 @@ void globalAvgPool_kernel(T* output, const T* input,
 
 template <typename T>
 void globalAvgPool(int N, int C, T* output, const T* input,
-                   const T* prevLayerBias, bool nhwc, sycl::queue &sycl_queue) {
+                   const T* prevLayerBias, sycl::queue &sycl_queue) {
   const int kPlaneSize = 64;
 
-  const bool fp16 = std::is_same<sycl::half, T>::value;
-  if (nhwc) {
-    assert(fp16);
-    // For NHWC fp16, simply launch N blocks, each with C threads.
-    /*
-    DPCT1049:11: The work-group size passed to the SYCL kernel may exceed the
-    limit. To get the device limit, query info::device::max_work_group_size.
-    Adjust the work-group size if needed.
-    */
-    {
-      
-      sycl_queue.parallel_for(
-          sycl::nd_range<3>(sycl::range<3>(1, 1, N) * sycl::range<3>(1, 1, C),
-                            sycl::range<3>(1, 1, C)),
-          [=](sycl::nd_item<3> item_ct1) {
-            globalAvgPool_kernel_NHWC_fp16((sycl::half*)output,
-                                           (sycl::half*)input,
-                                           (sycl::half*)prevLayerBias,
-                                           N * C * kPlaneSize, N * C, item_ct1);
-          });
-    }
-  } else {
-    // For NCHW layout (used with fp32),
-    // each warp processes a full plane (64 elements), and writes a single
-    // average N*C warps are launched.
+  // each warp processes a full plane (64 elements), and writes a single
+  // average N*C warps are launched.
 
-    const int kTotalWarps = N * C;
-    const int kWarpsPerBlock = 8;
-    const int kBlockSize = kWarpsPerBlock * 32;
+  const int kTotalWarps = N * C;
+  const int kWarpsPerBlock = 8;
+  const int kBlockSize = kWarpsPerBlock * 32;
 
-    int blocks = DivUp(kTotalWarps, kWarpsPerBlock);
-    sycl_queue.parallel_for(
-        sycl::nd_range<3>(
-            sycl::range<3>(1, 1, blocks) * sycl::range<3>(1, 1, kBlockSize),
-            sycl::range<3>(1, 1, kBlockSize)),
-        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SYCL_SUB_GROUP_SIZE)]] {
-          globalAvgPool_kernel(output, input, prevLayerBias, N * C * kPlaneSize,
-                               N * C, C, item_ct1);
-        });
-  }
+  int blocks = DivUp(kTotalWarps, kWarpsPerBlock);
+  sycl_queue.parallel_for(
+      sycl::nd_range<3>(
+          sycl::range<3>(1, 1, blocks) * sycl::range<3>(1, 1, kBlockSize),
+          sycl::range<3>(1, 1, kBlockSize)),
+      [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SYCL_SUB_GROUP_SIZE)]] {
+        globalAvgPool_kernel(output, input, prevLayerBias, N * C * kPlaneSize,
+                             N * C, C, item_ct1);
+      });
 }
 
 template <typename T>
 void globalScale(int N, int C, T* output, const T* input, const T* scaleBias,
-                 const T* prevLayerBias, bool nhwc,
+                 const T* prevLayerBias,
                  ActivationFunction activation, sycl::queue &sycl_queue) {
   const bool fp16 = std::is_same<sycl::half, T>::value;
 
@@ -953,28 +866,14 @@ void globalScale(int N, int C, T* output, const T* input, const T* scaleBias,
   const int kBlockSize = 256;
   const int kBlocks = DivUp(N * 8 * 8 * C, kBlockSize);
 
-  if (nhwc) {
-    assert(fp16);
-    sycl_queue.parallel_for(
-        sycl::nd_range<3>(
-            sycl::range<3>(1, 1, kBlocks) * sycl::range<3>(1, 1, kBlockSize),
-            sycl::range<3>(1, 1, kBlockSize)),
-        [=](sycl::nd_item<3> item_ct1) {
-          globalScale_kernel_fp16_nhwc(
-              (sycl::half*)output, (sycl::half*)input, (sycl::half*)scaleBias,
-              (sycl::half*)prevLayerBias, N * C * 8 * 8, C, 8 * 8 * C,
-              activation, item_ct1);
-        });
-  } else {
-    sycl_queue.parallel_for(
-        sycl::nd_range<3>(
-            sycl::range<3>(1, 1, kBlocks) * sycl::range<3>(1, 1, kBlockSize),
-            sycl::range<3>(1, 1, kBlockSize)),
-        [=](sycl::nd_item<3> item_ct1) {
-          globalScale_kernel(output, input, scaleBias, prevLayerBias,
-                             N * C * 8 * 8, C, activation, item_ct1);
-        });
-  }
+  sycl_queue.parallel_for(
+      sycl::nd_range<3>(
+          sycl::range<3>(1, 1, kBlocks) * sycl::range<3>(1, 1, kBlockSize),
+          sycl::range<3>(1, 1, kBlockSize)),
+      [=](sycl::nd_item<3> item_ct1) {
+        globalScale_kernel(output, input, scaleBias, prevLayerBias,
+                           N * C * 8 * 8, C, activation, item_ct1);
+      });
 }
 
 template <typename T>
@@ -1795,19 +1694,19 @@ template void addBias_NCHW<sycl::half>(sycl::half* c, sycl::half* a, sycl::half*
 
 template void globalAvgPool<float>(int N, int C, float* output,
                                    const float* input,
-                                   const float* prevLayerBias, bool nhwc, sycl::queue &sycl_queue);
+                                   const float* prevLayerBias, sycl::queue &sycl_queue);
 
 template void globalAvgPool<sycl::half>(int N, int C, sycl::half* output, const sycl::half* input,
-                                  const sycl::half* prevLayerBias, bool nhwc, sycl::queue &sycl_queue);
+                                  const sycl::half* prevLayerBias, sycl::queue &sycl_queue);
 
 template void globalScale<float>(int N, int C, float* output,
                                  const float* input, const float* scaleBias,
-                                 const float* prevLayerBias, bool nhwc,
+                                 const float* prevLayerBias,
                                  ActivationFunction activation, sycl::queue &sycl_queue);
 
 template void globalScale<sycl::half>(int N, int C, sycl::half* output, const sycl::half* input,
                                 const sycl::half* scaleBias,
-                                const sycl::half* prevLayerBias, bool nhwc,
+                                const sycl::half* prevLayerBias,
                                 ActivationFunction activation, sycl::queue &sycl_queue);
 
 template void PolicyMap<float>(int N, float* output, const float* input,

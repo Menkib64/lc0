@@ -254,7 +254,6 @@ class SyclNetwork : public Network {
     multi_stream_ = options.GetOrDefault<bool>("multi_stream", false);
 
     // layout used by cuda backend is nchw.
-    has_tensor_cores_ = false;
     constexpr bool fp16 = std::is_same<sycl::half, DataType>::value;
 
     //dpct::device_info deviceProp = {};
@@ -936,8 +935,7 @@ class SyclNetwork : public Network {
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     if (free_inputs_outputs_.empty()) {
       return std::make_unique<InputsOutputs>(
-          max_batch_size_, wdl_, moves_left_, *sycl_queue_, tensor_mem_size_, scratch_size_,
-          !has_tensor_cores_ && std::is_same<sycl::half, DataType>::value);
+          max_batch_size_, wdl_, moves_left_, *sycl_queue_, tensor_mem_size_, scratch_size_);
     } else {
       std::unique_ptr<InputsOutputs> resource =
           std::move(free_inputs_outputs_.front());
@@ -994,8 +992,6 @@ class SyclNetwork : public Network {
   // this is only used when multi-stream is disabled
   void** offset_pointers_ = nullptr;
   void** head_offset_pointers_ = nullptr;
-
-  bool has_tensor_cores_;
 
   // not used when multi-steam is enabled
   //dpct::queue_ptr cublas_;
