@@ -671,42 +671,11 @@ class SyclNetwork : public Network {
     DataType* skip_connection =
         use_res_block_winograd_fuse_opt_ ? tensor_mem[1] : tensor_mem[2];
 
-    
-//#if DPCT_COMPAT_RT_VERSION >= 11000
-    const int pre_transform_tensor_size =
-        batchSize * numFilters_ * 8 * 8 * sizeof(DataType);
-    const int transformed_tensor_size = pre_transform_tensor_size * 36 / 16;
-    const int res_block_mem =
-        transformed_tensor_size * 2 + pre_transform_tensor_size;
-
-    //cudaStreamAttrValue stream_attribute = {};
-    //stream_attribute.accessPolicyWindow.base_ptr = tensor_mem[2];
-    //stream_attribute.accessPolicyWindow.num_bytes = res_block_mem;
-    //stream_attribute.accessPolicyWindow.hitRatio = 1.0f;
-    //stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
-    //stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-
-    //if (allow_cache_opt_ && use_res_block_winograd_fuse_opt_ &&
-    //    (res_block_mem <= scratch_size_) && (res_block_mem <= l2_cache_size_)) {
-      // we can use a single alloc to hold all the required tensors, and enable
-      // persistent L2 caching on it
-      /*
-      DPCT1007:87: Migration of cudaStreamSetAttribute is not supported.
-      */
-      //cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
-
-     // enableCacheOpt = true;
-    //  skip_connection =
-    //      tensor_mem[2] + 2 * transformed_tensor_size / sizeof(DataType);
-   // }
-//#endif
-
     int l = 0;
 
     DataType* flow = tensor_mem[0];
     DataType* spare1 = tensor_mem[1];
     DataType* spare2 = tensor_mem[2];
-    
 
     if (numBlocks_ > 0) {
       // Input.
