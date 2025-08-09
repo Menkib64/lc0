@@ -539,7 +539,7 @@ class SyclNetwork : public Network {
       BaseLayer<DataType>* lastlayer = attn_body_ ? encoder_last_ : resi_last_;
       auto value_main = std::make_unique<ValueHead<DataType>>(
           lastlayer, head, scratch_mem_, attn_body_, wdl_, act,
-          max_batch_size_, *sycl_queue_);
+          *sycl_queue_);
       network_.emplace_back(std::move(value_main));
     }
 

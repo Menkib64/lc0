@@ -2546,7 +2546,7 @@ template <typename DataType>
 ValueHead<DataType>::ValueHead(BaseLayer<DataType>* ip,
                                const MultiHeadWeights::ValueHead& weights,
                                void* scratch, bool attention_body, bool wdl,
-                               ActivationFunction act, int max_batch_size,
+                               ActivationFunction act,
                                sycl::queue &sycl_queue)
     : BaseLayer<DataType>(weights.ip_val_b.size(), 8, 8, ip, sycl_queue),
       embedding_size_(attention_body ? weights.ip_val_b.size()

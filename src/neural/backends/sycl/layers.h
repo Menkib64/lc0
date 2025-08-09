@@ -480,7 +480,7 @@ class ValueHead : public BaseLayer<DataType> {
  public:
   ValueHead(BaseLayer<DataType>* ip, const MultiHeadWeights::ValueHead& weights,
             void* scratch, bool attention_body, bool wdl, ActivationFunction act,
-            int max_batch_size, sycl::queue &sycl_queue);
+            sycl::queue &sycl_queue);
   ~ValueHead();
   void Eval(int N, DataType* output, const DataType* input,
             const DataType* input2, void* scratch, size_t scratch_size,
