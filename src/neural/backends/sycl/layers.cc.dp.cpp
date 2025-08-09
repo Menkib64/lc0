@@ -15,7 +15,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-   
+
   SPDX-License-Identifier:GNU General Public License v3.0 or later
 */
 
@@ -27,7 +27,7 @@
 #include <cstring>
 #include <vector>
 
-#ifdef USE_HIPBLAS 
+#ifdef USE_HIPBLAS
 #include "hipblas/hipblas.h"
 #include "cuBlasContext.h"
 #elif defined(USE_CUBLAS)
@@ -56,15 +56,15 @@
 #define HIPBLAS_COMPUTE_16F HIPBLAS_R_16F
 #define HIPBLAS_COMPUTE_32F HIPBLAS_R_32F
 #endif
-#define transpose_type hipblasOperation_t 
-#define transpose_type_transpose HIPBLAS_OP_T  
-#define transpose_type_notranspose HIPBLAS_OP_N 
+#define transpose_type hipblasOperation_t
+#define transpose_type_transpose HIPBLAS_OP_T
+#define transpose_type_notranspose HIPBLAS_OP_N
 #elif defined(USE_CUBLAS)
-#define transpose_type cublasOperation_t 
-#define transpose_type_transpose CUBLAS_OP_T  
-#define transpose_type_notranspose CUBLAS_OP_N 
+#define transpose_type cublasOperation_t
+#define transpose_type_transpose CUBLAS_OP_T
+#define transpose_type_notranspose CUBLAS_OP_N
 #else
-#define transpose_type oneapi::mkl::transpose 
+#define transpose_type oneapi::mkl::transpose
 #define transpose_type_transpose oneapi::mkl::transpose::trans
 #define transpose_type_notranspose oneapi::mkl::transpose::nontrans
 #endif
@@ -155,20 +155,20 @@ void SELayer<sycl::half>::LoadWeights(float* w1, float* b1, float* w2, float* b2
   std::vector<float> temp(weight_size2);
 
   // Weight for the first FC layer.
- 
+
   sycl_queue_.memcpy(scratch, w1, weight_size1).wait();
 
   copyTypeConverted((sycl::half*)w1_, (float*)scratch, (int)num_weights1, sycl_queue_);
 
   // Weight for the second FC layer.
   sycl_queue_.memcpy(scratch, w2, weight_size2).wait();
-  
+
   copyTypeConverted((sycl::half*)w2_, (float*)scratch, (int)num_weights2, sycl_queue_);
 
   // Bias for the first FC layer.
-    
+
   sycl_queue_.memcpy(scratch, b1, numFc1Out_ * sizeof(float)).wait();
-  
+
   copyTypeConverted((sycl::half*)b1_, (float*)scratch, numFc1Out_, sycl_queue_);
 
   // Bias for the second FC layer.
@@ -178,19 +178,19 @@ void SELayer<sycl::half>::LoadWeights(float* w1, float* b1, float* w2, float* b2
 
   // Bias for previous layer (Convolution).
   if (prevLayerBias) {
-    
+
     sycl_queue_.memcpy(scratch, prevLayerBias, C * sizeof(float)).wait();
     copyTypeConverted((sycl::half*)bPrev_, (float*)scratch, C, sycl_queue_);
   }
 
-} 
+}
 
 template <>
 void SELayer<float>::Eval(int N, float* output, const float* input,
                           const float* /*input2*/, void* scratch,
                           size_t scratch_size, sycl::queue &sycl_queue, float***) {
 
-  //CERR << "SELayer<float>::Eval. ";                          
+  //CERR << "SELayer<float>::Eval. ";
   // Ping-pong between 'op1' and 'op2' (parts of scratch memory).
   float* op1 = (float*)scratch;
   float* op2 = (float*)scratch + scratch_size / sizeof(float) / 2;
@@ -211,7 +211,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
         cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);  
+        cublasSetStream(handle, cudaStreamHandle);
 
         ReportCUBLASErrors(cublasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, numFc1Out_,
                                  N, C, &alpha, w1_, C, op2, C, &beta, op1,
@@ -223,20 +223,18 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
 
   sycl_queue.submit([&](sycl::handler &cgh) {
-        //auto d_A = b_A.get_access<sycl::access::mode::read_write>(cgh);
-        
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
+      cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);  
+        hipblasSetStream(handle, hipStreamHandle);
 
         hipblasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, numFc1Out_,
                                  N, C, &alpha, w1_, C, op2, C, &beta, op1,
                                  numFc1Out_);
         });
-  });  
+  });
   #else
-  
+
   oneapi::mkl::blas::column_major::gemm(sycl_queue, transpose_type_transpose,
         transpose_type_notranspose, numFc1Out_, N, C, alpha, w1_, C, op2,
         C, beta, op1, numFc1Out_);
@@ -252,7 +250,7 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
         cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);  
+        cublasSetStream(handle, cudaStreamHandle);
 
         ReportCUBLASErrors(cublasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, 2 * C, N,
                                  numFc1Out_, &alpha, w2_, numFc1Out_, op1,
@@ -266,13 +264,12 @@ void SELayer<float>::Eval(int N, float* output, const float* input,
       cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);  
+        hipblasSetStream(handle, hipStreamHandle);
 
         hipblasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, 2 * C, N,
                                  numFc1Out_, &alpha, w2_, numFc1Out_, op1,
                                  numFc1Out_, &beta, op2, 2 * C);
 
-        
         });
   });
   #else
@@ -418,7 +415,7 @@ FCLayer<DataType>::FCLayer(BaseLayer<DataType>* ip, int C, int H, int W,
   const size_t weight_size =
       sizeof(DataType) * C * H * W * ip->GetC() * ip->GetH() * ip->GetW();
   const size_t bias_size = sizeof(DataType) * C * H * W;
-  
+
   weights_ = (DataType*)sycl::malloc_device(weight_size, sycl_queue_);
 
   if (use_bias_) {
@@ -446,8 +443,8 @@ void FCLayer<sycl::half>::LoadWeights(float* cpuWeight, float* cpuBias,
   if (cpuBias) {
     sycl_queue_.memcpy(scratch, cpuBias, bias_size).wait();
     copyTypeConverted((sycl::half*)biases_, (float*)scratch, (int)num_biases, sycl_queue_);
-  } 
-} 
+  }
+}
 
 template <>
 void FCLayer<float>::LoadWeights(float* cpuWeight, float* cpuBias,
@@ -458,9 +455,8 @@ void FCLayer<float>::LoadWeights(float* cpuWeight, float* cpuBias,
   const size_t num_biases = C * H * W;
   const size_t bias_size = sizeof(float) * num_biases;
 
-  
   sycl_queue_.memcpy(weights_, cpuWeight, weight_size);
-  
+
   if (use_bias_) {
     sycl_queue_.memcpy(biases_, cpuBias, bias_size);
   }
@@ -478,9 +474,9 @@ template <>
    const int num_outputs = C * H * W;
    const int num_inputs = input_->GetC() * input_->GetH() * input_->GetW();
 
-   //sycl::half alpha = float2half_rn(1.0f), 
+   //sycl::half alpha = float2half_rn(1.0f),
    //beta = float2half_rn(0.0f);
-   
+
    #ifdef USE_CUBLAS
     __half_raw one_h{0x3C00};
     __half_raw zero_h{0};
@@ -503,15 +499,15 @@ template <>
          cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
          auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-         cublasSetStream(handle, cudaStreamHandle);    
-  
+         cublasSetStream(handle, cudaStreamHandle);
+
          ReportCUBLASErrors(cublasHgemm(handle, transpose_type_transpose, transpose_type_notranspose, num_outputs,
                                   N, num_inputs, &alpha, ((const half *)weights_), num_inputs,
                                   ((const half *)input_tensor), num_inputs, &beta, ((half *)output_tensor),
                                   num_outputs));
 
        });
-   });  
+   });
 #elif defined(USE_HIPBLAS)
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
   sycl_queue.submit([&](sycl::handler &cgh) {
@@ -539,7 +535,7 @@ template <>
      addVectors(output_tensor, biases_, output_tensor, num_outputs * N,
                 num_outputs, num_outputs * N, act_, sycl_queue);
    }
- } 
+ }
 
 template <>
 void FCLayer<float>::Eval(int N, float* output_tensor,
@@ -561,7 +557,7 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
         cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
 
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
+        cublasSetStream(handle, cudaStreamHandle);
 
 
         ReportCUBLASErrors(cublasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, num_outputs,
@@ -570,14 +566,14 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
                                  num_outputs));
 
       });
-  });  
+  });
   #elif defined(USE_HIPBLAS)
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
   sycl_queue.submit([&](sycl::handler &cgh) {
       cgh.ext_codeplay_enqueue_native_command([=, this](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);    
+        hipblasSetStream(handle, hipStreamHandle);
 
 
         hipblasSgemm(handle, transpose_type_transpose, transpose_type_notranspose, num_outputs,
@@ -585,7 +581,6 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
                                  input_tensor, num_inputs, &beta, output_tensor,
                                  num_outputs);
 
-        
       });
   });
   #else
@@ -594,7 +589,7 @@ void FCLayer<float>::Eval(int N, float* output_tensor,
         transpose_type_notranspose, num_outputs, N, num_inputs, alpha,
         weights_, num_inputs, input_tensor, num_inputs, beta, output_tensor,
         num_outputs);
-    
+
     //event.wait();
   #endif
 
@@ -621,7 +616,7 @@ PolicyMapLayer<DataType>::PolicyMapLayer(BaseLayer<DataType>* ip, int C, int H,
   size_t weight_size = sizeof(short) * this->input_->GetC() * 64;
 
   if (attention) weight_size = sizeof(short) * usedSize;
-  
+
   weights_ = (short *)sycl::malloc_device(weight_size, sycl_queue_);
 }
 
@@ -638,8 +633,8 @@ template <typename DataType>
 void PolicyMapLayer<DataType>::Eval(
     int N, DataType* output_tensor, const DataType* input_tensor,
     const DataType* /*input2*/, void* /*scratch*/, size_t /*scratch_size*/, sycl::queue &sycl_queue, DataType***) {
-  
-  //CERR << "PolicyMapLayer<DataType>::Eval. ";    
+
+  //CERR << "PolicyMapLayer<DataType>::Eval. ";
 
   int inputSize =
       this->input_->GetC() * this->input_->GetH() * this->input_->GetW();
@@ -717,10 +712,9 @@ template <typename DataType> void FusedWinogradConvSELayer<DataType>::LoadWeight
   copyTypeConverted((DataType*)weights, (float*)scratch, C * c_input_ * 3 * 3, sycl_queue_);
 
   if (pBias) {
-    
-    
+
     //sycl_queue_.memcpy(scratch, pBias, bias_size).wait();
-    sycl_queue_.memcpy(scratch, pBias, bias_size);  
+    sycl_queue_.memcpy(scratch, pBias, bias_size);
 
     float total = 0;
     for(int i = 0; i < C; i++)
@@ -755,7 +749,7 @@ void FusedWinogradConvSELayer<DataType>::LoadSEWeights(float* w1, float* b1,
   CpuTranspose(temp_transposed.data(), w1, se_k_, C);
   //sycl_queue_.memcpy(scratch, temp_transposed.data(), num_weights1 * sizeof(float)).wait();
   sycl_queue_.memcpy(scratch, temp_transposed.data(), num_weights1 * sizeof(float)).wait();
-  
+
   copyTypeConverted((DataType*)w1_, (float*)scratch, (int)num_weights1, sycl_queue_);
 
   CpuTranspose(temp_transposed.data(), w2, 2 * C, se_k_);
@@ -797,14 +791,14 @@ template <>
 
    // cublas supports only col major output
    // to multiply row major matrices, use the trick below
-  
+
   #ifdef USE_CUBLAS
    cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
-  
+
    sycl_queue.submit([&](sycl::handler &cgh) {
         //auto d_A = b_A.get_access<sycl::access::mode::read_write>(cgh);
          cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-  
+
           auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
           cublasSetStream(handle, cudaStreamHandle);
 
@@ -813,10 +807,9 @@ template <>
              N * K, A, CUDA_R_16F, K, K * M, &zero_h, Out, CUDA_R_16F, N, N * M,
              batchSize, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
 
-          
-         });   
+         });
    });
-  
+
 #elif defined(USE_HIPBLAS)
   hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
 
@@ -852,7 +845,7 @@ template <> void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const
 
   #ifdef USE_CUBLAS
   //static cublasHandle_t handle;
-  //ReportCUBLASErrors(cublasCreate(&handle)); 
+  //ReportCUBLASErrors(cublasCreate(&handle));
   cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
   #endif
 
@@ -866,14 +859,14 @@ template <> void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const
         //auto d_A = b_A.get_access<sycl::access::mode::read_write>(cgh);
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
             auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-            cublasSetStream(handle, cudaStreamHandle);   
+            cublasSetStream(handle, cudaStreamHandle);
 
           ReportCUBLASErrors(cublasGemmStridedBatchedEx(
             handle, transpose_type_notranspose, transpose_type_notranspose, N, M, K, &floatOne, B, CUDA_R_32F, N,
             N * K, A, CUDA_R_32F, K, K * M, &floatZero, Out, CUDA_R_32F, N, N * M,
           batchSize, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
 
-          
+
         });
     });
     #elif defined(USE_HIPBLAS)
@@ -881,16 +874,16 @@ template <> void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const
         //auto d_A = b_A.get_access<sycl::access::mode::read_write>(cgh);
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
             auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
-            hipblasSetStream(handle, hipStreamHandle);   
+            hipblasSetStream(handle, hipStreamHandle);
 
           hipblasGemmStridedBatchedEx(
             handle, transpose_type_notranspose, transpose_type_notranspose, N, M, K, &floatOne, B, HIPBLAS_R_32F, N,
             N * K, A, HIPBLAS_R_32F, K, K * M, &floatZero, Out, HIPBLAS_R_32F, N, N * M,
           batchSize, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
 
-          
+
         });
-    });  
+    });
     #else
       int64_t M_ = M;
       int64_t N_ = N;
@@ -996,7 +989,7 @@ Conv1Layer<DataType>::Conv1Layer(BaseLayer<DataType>* ip, int C, int H, int W,
 
   if (use_bias_) {
     const size_t bias_size = sizeof(DataType) * C;
-    //CERR << "Conv1Layer using bias " << bias_size; 
+    //CERR << "Conv1Layer using bias " << bias_size;
     biases_ = (DataType *)sycl::malloc_device(bias_size, sycl_queue_);
   }
 }
@@ -1047,9 +1040,8 @@ template <>
 
 #ifdef USE_CUBLAS
     sycl_queue.submit([&](sycl::handler &cgh) {
-         
          cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-  
+
           auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
           cublasSetStream(handle, cudaStreamHandle);
 
@@ -1059,7 +1051,7 @@ template <>
          N * K, A, CUDA_R_16F, K, 0, &zero_h, Out, CUDA_R_16F, N, N * M,
          batchSize, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
 
-         });   
+         });
    });
 #elif defined(USE_HIPBLAS)
     sycl_queue.submit([&](sycl::handler &cgh) {
@@ -1103,9 +1095,8 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
   {
     #ifdef USE_CUBLAS
     sycl_queue.submit([&](sycl::handler &cgh) {
-        
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-  
+
          auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
          cublasSetStream(handle, cudaStreamHandle);
 
@@ -1115,14 +1106,13 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
           N * K, A, CUDA_R_32F, K, 0, &floatZero, Out, CUDA_R_32F, N, N * M,
           batchSize, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
 
-        });   
+        });
     });
     #elif defined(USE_HIPBLAS)
     sycl_queue.submit([&](sycl::handler &cgh) {
-        
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
          auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
-  
+
          hipblasSetStream(handle, hipStreamHandle);
 
 
@@ -1131,7 +1121,7 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
           N * K, A, HIPBLAS_R_32F, K, 0, &floatZero, Out, HIPBLAS_R_32F, N, N * M,
           batchSize, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
 
-        });   
+        });
     });
     #else
 
@@ -1141,7 +1131,7 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
       oneapi::mkl::blas::column_major::gemm_batch(
         sycl_queue, transpose_type_notranspose,
         transpose_type_notranspose, N_, M_, K_, floatOne, B, N_, N_ * K_, A, K_,
-        0, floatZero, Out, N_, N_ * M_, batchSize); 
+        0, floatZero, Out, N_, N_ * M_, batchSize);
     #endif
   }
 }
@@ -1168,9 +1158,9 @@ void Conv1Layer<DataType>::Eval(int N, DataType* output, const DataType* input,
 
 template <typename DataType>
 Conv1Layer<DataType>::~Conv1Layer() {
- 
+
   free(weights_, sycl_queue_);
-  if (use_bias_) 
+  if (use_bias_)
     free(biases_, sycl_queue_);
 }
 
@@ -1201,7 +1191,7 @@ ResidualBlock<DataType>::ResidualBlock(BaseLayer<DataType>* ip, int C, bool se,
 
   // 6x6 transformed filter size, for 3x3 convolution
   transformed_weights0_ = (DataType *)sycl::malloc_device(weight_size * 4, sycl_queue_);
-  transformed_weights1_ = (DataType *)sycl::malloc_device(weight_size * 4, sycl_queue_);  
+  transformed_weights1_ = (DataType *)sycl::malloc_device(weight_size * 4, sycl_queue_);
 
 
   if (has_se_) {
@@ -1251,7 +1241,7 @@ void ResidualBlock<DataType>::LoadWeights0(float* pfilter, float* pBias,
 }
 
 template <typename DataType> void ResidualBlock<DataType>::LoadWeights1(float* pfilter, float* pBias, void* scratch) {
-  
+
   const size_t weight_size = sizeof(float) * C * C * 3 * 3;
   const size_t bias_size = sizeof(float) * C;
 
@@ -1285,20 +1275,20 @@ template <typename DataType> void ResidualBlock<DataType>::LoadSEWeights(float* 
   std::vector<float> temp_transposed(num_weights2);
 
   CpuTranspose(temp_transposed.data(), w1, se_k_, C);
-  
+
   sycl_queue_.memcpy(scratch, temp_transposed.data(), num_weights1 * sizeof(float)).wait();
   copyTypeConverted((DataType*)w1_, (float*)scratch, (int)num_weights1, sycl_queue_);
 
   CpuTranspose(temp_transposed.data(), w2, 2 * C, se_k_);
-  
-  sycl_queue_.memcpy(scratch, temp_transposed.data(), num_weights2 * sizeof(float)).wait(); 
+
+  sycl_queue_.memcpy(scratch, temp_transposed.data(), num_weights2 * sizeof(float)).wait();
   copyTypeConverted((DataType*)w2_, (float*)scratch, (int)num_weights2, sycl_queue_);
 
-  
+
   sycl_queue_.memcpy(scratch, b1, num_biases1 * sizeof(float)).wait();
   copyTypeConverted((DataType*)b1_, (float*)scratch, (int)num_biases1, sycl_queue_);
 
-  
+
   sycl_queue_.memcpy(scratch, b2, num_biases2 * sizeof(float)).wait();
   copyTypeConverted((DataType*)b2_, (float*)scratch, (int)num_biases2, sycl_queue_);
 }
@@ -1495,7 +1485,7 @@ AttentionPolicyHead<DataType>::AttentionPolicyHead(
     size_t size = elements * sizeof(DataType) * 2;
     wqk_w_ = (DataType*)sycl::malloc_device(size, sycl_queue_);
     sycl_queue_.memcpy(wqk_w_, ip2_pol_w_, size / 2);
-    
+
     sycl_queue_.memcpy(wqk_w_ + elements, ip3_pol_w_, size / 2);
 
     elements = weights.ip2_pol_b.size();
@@ -1555,7 +1545,7 @@ EncoderBlock<DataType>::EncoderBlock(
   {
     size_t elements = cpu_weights.mha.q_w.size();
     size_t size = elements * sizeof(DataType) * 3;
-    
+
     mha_qkv_w = (DataType*)sycl::malloc_device(size, sycl_queue_);
     sycl_queue_.memcpy(mha_qkv_w, mha_q_w, size / 3);
     sycl_queue_.memcpy(mha_qkv_w + elements, mha_k_w, size / 3);
@@ -1563,7 +1553,7 @@ EncoderBlock<DataType>::EncoderBlock(
 
     elements = cpu_weights.mha.q_b.size();
     size = elements * sizeof(DataType) * 3;
-    
+
     mha_qkv_b = (DataType*)sycl::malloc_device(size, sycl_queue_);
     sycl_queue_.memcpy(mha_qkv_b, mha_q_b, size / 3);
     sycl_queue_.memcpy(mha_qkv_b + elements, mha_k_b, size / 3);
@@ -1627,7 +1617,7 @@ static void cublasXgemm(transpose_type transa,
 
 
   const bool fp16 = std::is_same<sycl::half, DataType>::value;
-  
+
   #ifdef USE_CUBLAS
   cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
   if (fp16) {
@@ -1636,17 +1626,17 @@ static void cublasXgemm(transpose_type transa,
     sycl_queue.submit([&](sycl::handler &cgh) {
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
+        cublasSetStream(handle, cudaStreamHandle);
         ReportCUBLASErrors(cublasHgemm(
           handle, transa, transb, m, n, k, (const half*)&alpha_h, ((const half *)A),
           lda, ((const half *)B), ldb, (const half*)&beta_h, ((half *)C), ldc));
       });
     });
-  } else { 
+  } else {
     sycl_queue.submit([&](sycl::handler &cgh) {
-        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {  
+        cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);  
+        cublasSetStream(handle, cudaStreamHandle);
         ReportCUBLASErrors(cublasSgemm(handle, transa, transb, m, n, k, &alpha,
                                    (const float*)A, lda, (const float*)B, ldb,
                                    &beta, (float*)C, ldc));
@@ -1669,9 +1659,9 @@ static void cublasXgemm(transpose_type transa,
       });
   } else {
     sycl_queue.submit([&](sycl::handler &cgh) {
-      cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {  
+      cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
-        hipblasSetStream(handle, hipStreamHandle);  
+        hipblasSetStream(handle, hipStreamHandle);
         hipblasSgemm(handle, transa, transb, m, n, k, &alpha, (const float*)A, lda, (const float*)B, ldb, &beta, (float*)C, ldc);
         });
       });
@@ -1690,43 +1680,41 @@ static void cublasXGemmStridedBatched(transpose_type transa, transpose_type tran
     float beta, void* C, int ldc, long long int strideC, int batchCount, sycl::queue &sycl_queue) {
 
   const bool fp16 = std::is_same<sycl::half, DataType>::value;
-  
+
   #ifdef USE_CUBLAS
   cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
   if (fp16) {
     unsigned short alpha_h = FP32toFP16(alpha);
     unsigned short beta_h = FP32toFP16(beta);
-    
+
     sycl_queue.submit([&](sycl::handler &cgh) {
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
+        cublasSetStream(handle, cudaStreamHandle);
 
         ReportCUBLASErrors(cublasGemmStridedBatchedEx(
           handle, transa, transb, m, n, k, &alpha_h, A, CUDA_R_16F, lda, strideA,
           B, CUDA_R_16F, ldb, strideB, &beta_h, C, CUDA_R_16F, ldc, strideC,
           batchCount, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
-        
+
 
       });
 
     });
-  
-  } else { 
-    
+
+  } else {
+
     sycl_queue.submit([&](sycl::handler &cgh) {
-        
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
-    
+
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
-    
+        cublasSetStream(handle, cudaStreamHandle);
+
         ReportCUBLASErrors(cublasGemmStridedBatchedEx(
         handle, transa, transb, m, n, k, &alpha, A, CUDA_R_32F, lda, strideA, B,
         CUDA_R_32F, ldb, strideB, &beta, C, CUDA_R_32F, ldc, strideC,
         batchCount, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
-  
-  
+
       });
     });
   }
@@ -1756,15 +1744,14 @@ static void cublasXGemmStridedBatched(transpose_type transa, transpose_type tran
 
       cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
-    
-        hipblasSetStream(handle, hipStreamHandle);    
-    
+
+        hipblasSetStream(handle, hipStreamHandle);
+
         hipblasGemmStridedBatchedEx(
         handle, transa, transb, m, n, k, &alpha, A, HIPBLAS_R_32F, lda, strideA, B,
         HIPBLAS_R_32F, ldb, strideB, &beta, C, HIPBLAS_R_32F, ldc, strideC,
         batchCount, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
-  
-  
+
       });
     });
   }
@@ -1784,7 +1771,7 @@ static void cublasXGemmBatched(transpose_type transa,
 
   #ifdef USE_CUBLAS
   cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
-  
+
   if (fp16) {
     unsigned short alpha_h = FP32toFP16(alpha);
     unsigned short beta_h = FP32toFP16(beta);
@@ -1793,27 +1780,27 @@ static void cublasXGemmBatched(transpose_type transa,
     sycl_queue.submit([&](sycl::handler &cgh) {
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
+        cublasSetStream(handle, cudaStreamHandle);
 
         ReportCUBLASErrors(cublasHgemmBatched(
         handle, transa, transb, m, n, k, (const half*)&alpha_h, (half**)A, lda,
         (half**)B, ldb, (const half*)&beta_h, (half**)C, ldc, batchCount));
-        
+
       });
 
     });
 
   } else {
-    
+
     sycl_queue.submit([&](sycl::handler &cgh) {
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto cudaStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_cuda>();
-        cublasSetStream(handle, cudaStreamHandle);    
+        cublasSetStream(handle, cudaStreamHandle);
 
         ReportCUBLASErrors(cublasSgemmBatched(
         handle, transa, transb, m, n, k, &alpha, (float**)A, lda, (float**)B,
         ldb, &beta, (float**)C, ldc, batchCount));
-        
+
       });
 
     });
@@ -1822,7 +1809,7 @@ static void cublasXGemmBatched(transpose_type transa,
   #elif defined(USE_HIPBLAS)
 
    hipblasHandle_t handle = hipBlasContextManager::gethipBlasHandle_t();
-  
+
   if (fp16) {
     unsigned short alpha_h = FP32toFP16(alpha);
     unsigned short beta_h = FP32toFP16(beta);
@@ -1832,28 +1819,28 @@ static void cublasXGemmBatched(transpose_type transa,
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);       
+        hipblasSetStream(handle, hipStreamHandle);
 
         hipblasHgemmBatched(
         handle, transa, transb, m, n, k, (const hipblasHalf*)&alpha_h, (hipblasHalf**)A, lda,
         (hipblasHalf**)B, ldb, (const hipblasHalf*)&beta_h, (hipblasHalf**)C, ldc, batchCount);
-        
+
       });
 
     });
 
   } else {
-    
+
     sycl_queue.submit([&](sycl::handler &cgh) {
         cgh.ext_codeplay_enqueue_native_command([=](sycl::interop_handle ih) {
         auto hipStreamHandle = ih.get_native_queue<sycl::backend::ext_oneapi_hip>();
 
-        hipblasSetStream(handle, hipStreamHandle);        
+        hipblasSetStream(handle, hipStreamHandle);
 
         hipblasSgemmBatched(
         handle, transa, transb, m, n, k, &alpha, (float**)A, lda, (float**)B,
         ldb, &beta, (float**)C, ldc, batchCount);
-        
+
 
       });
 
@@ -2006,7 +1993,7 @@ void EncoderBlock<DataType>::Eval(int N, DataType* in_out_tensor,
   // matmul_qk = tf.matmul(q, k, transpose_b=True)
   {
     if (*offset_pointers == nullptr) {
-      
+
       *offset_pointers = sycl::malloc_device<DataType*>(
                                encoder_heads_ * max_batch_size_ * 5,
                                sycl_queue_);
@@ -2267,7 +2254,7 @@ void EmbeddingLayer<DataType>::Eval(
     int N, DataType* output, const DataType* input, const DataType* /*input2*/,
     void* /*scratch*/, size_t /*scratch_size*/, sycl::queue &sycl_queue, DataType***) {
 
-  
+
   //CERR << "EmbeddingLayer<DataType>::Eval. ";
 
   const int num_outputs = this->GetC();
@@ -2392,7 +2379,7 @@ template <typename DataType>
 void AttentionBody<DataType>::Eval(int N, DataType* output,
                                    const DataType* input,
                                    const DataType* input2, void* scratch,
-                                   size_t scratch_size, 
+                                   size_t scratch_size,
                                    sycl::queue &sycl_queue,
                                    DataType*** offset_pointers) {
 
