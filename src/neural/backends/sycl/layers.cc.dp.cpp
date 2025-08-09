@@ -855,10 +855,6 @@ template <> void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const
   float floatOne = 1.0f;
   float floatZero = 0.0f;
 
-  int64_t M_ = M;
-  int64_t N_ = N;
-  int64_t K_ = K;
-
   #ifdef USE_CUBLAS
   //static cublasHandle_t handle;
   //ReportCUBLASErrors(cublasCreate(&handle)); 
@@ -901,6 +897,10 @@ template <> void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const
         });
     });  
     #else
+      int64_t M_ = M;
+      int64_t N_ = N;
+      int64_t K_ = K;
+
       oneapi::mkl::blas::column_major::gemm_batch(sycl_queue, transpose_type_notranspose,
             transpose_type_notranspose, N_, M_, K_, floatOne, B, N_, N_ * K_, A, K_, K_ * M_, floatZero, Out, N_, N_ * M_, batchSize);
     #endif
@@ -1096,11 +1096,6 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
   float floatOne = 1.0f;
   float floatZero = 0.0f;
 
-
-  int64_t M_ = M;
-  int64_t N_ = N;
-  int64_t K_ = K;
-
   #ifdef USE_CUBLAS
    cublasHandle_t handle = cuBlasContextManager::getcuBlasHandle_t();
   #endif
@@ -1144,6 +1139,10 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
         });   
     });
     #else
+
+      int64_t M_ = M;
+      int64_t N_ = N;
+      int64_t K_ = K;
       oneapi::mkl::blas::column_major::gemm_batch(
         sycl_queue, transpose_type_notranspose,
         transpose_type_notranspose, N_, M_, K_, floatOne, B, N_, N_ * K_, A, K_,
