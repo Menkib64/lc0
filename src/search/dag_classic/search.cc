@@ -1717,18 +1717,14 @@ void SearchWorker::PickNodesToExtendTask(
       // First check if node is terminal or not-expanded.  If either than create
       // a collision of appropriate size and pop current_path.
       if (ShouldStopPickingHere(node, is_root_node, repetitions)) {
-        if (is_root_node) {
-          // Root node is special - since its not reached from anywhere else, so
-          // it needs its own logic. Still need to create the collision to
-          // ensure the outer gather loop gives up.
-          if (node->TryStartScoreUpdate()) {
-            cur_limit -= 1;
-            minibatch_.push_back(
-                NodeToProcess::Visit(full_path, search_->played_history_));
-            completed_visits++;
-          }
+        // Create a visit for the selected node.
+        if (node->TryStartScoreUpdate()) {
+          cur_limit -= 1;
+          receiver->push_back(
+              NodeToProcess::Visit(full_path, history));
+          completed_visits++;
         }
-        // Visits are created elsewhere, just need the collisions here.
+        // There is no more possible visits. We must create a collision.
         if (cur_limit > 0) {
           int max_count = 0;
           if (cur_limit == collision_limit && path.size() == 1 &&
@@ -1750,11 +1746,8 @@ void SearchWorker::PickNodesToExtendTask(
         current_path.pop_back();
         continue;
       }
-      if (is_root_node) {
-        // Root node is again special - needs its n in flight updated separately
-        // as its not handled on the path to it, since there isn't one.
-        node->IncrementNInFlight(cur_limit);
-      }
+
+      node->IncrementNInFlight(cur_limit);
 
       // Create visits_to_perform new back entry for this level.
       if (vtp_buffer.size() > 0) {
@@ -1882,38 +1875,17 @@ void SearchWorker::PickNodesToExtendTask(
           auto* vtp_array = visits_to_perform.back().get()->data();
           std::fill(vtp_array + (vtp_last_filled.back() + 1),
                     vtp_array + best_idx + 1, 0);
+          vtp_last_filled.back() = best_idx;
         }
         (*visits_to_perform.back())[best_idx] += new_visits;
         cur_limit -= new_visits;
 
-        Node* child_node = best_edge.GetOrSpawnNode(/* parent */ node);
-        history.Append(best_edge.GetMove());
-        auto [child_repetitions, child_moves_left] =
-            GetRepetitions(full_path.size(), history.Last());
-        full_path.push_back({child_node, child_repetitions, child_moves_left});
-        if (child_node->TryStartScoreUpdate()) {
-          current_nstarted[best_idx]++;
-          new_visits -= 1;
-          if (ShouldStopPickingHere(child_node, false, child_repetitions)) {
-            // Reduce 1 for the visits_to_perform to ensure the collision
-            // created doesn't include this visit.
-            (*visits_to_perform.back())[best_idx] -= 1;
-            receiver->push_back(NodeToProcess::Visit(full_path, history));
-            completed_visits++;
-          } else {
-            child_node->IncrementNInFlight(new_visits);
-            current_nstarted[best_idx] += new_visits;
-          }
-          current_score[best_idx] = cur_iters[best_idx].GetP() * puct_mult /
-                                        (1 + current_nstarted[best_idx]) +
-                                    current_util[best_idx];
-        }
-        if (best_idx > vtp_last_filled.back() &&
-            (*visits_to_perform.back())[best_idx] > 0) {
-          vtp_last_filled.back() = best_idx;
-        }
-        history.Pop();
-        full_path.pop_back();
+        int ntotal = (*visits_to_perform.back())[best_idx] +
+                     current_nstarted[best_idx];
+
+        current_score[best_idx] = cur_iters[best_idx].GetP() * puct_mult /
+                                      (1 + ntotal) +
+                                  current_util[best_idx];
       }
       is_root_node = false;
       // Actively do any splits now rather than waiting for potentially long
