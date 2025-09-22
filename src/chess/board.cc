@@ -34,7 +34,9 @@
 #include <cstring>
 #include <sstream>
 #include <utility>
+#if __has_include(<absl/cleanup/cleanup.h>)
 #include <absl/cleanup/cleanup.h>
+#endif
 
 #include "utils/exception.h"
 
@@ -596,6 +598,7 @@ bool ChessBoard::IsValid() const {
 bool ChessBoard::ApplyMove(Move move) {
   assert(our_pieces_.intersects(BitBoard::FromSquare(move.from())));
 #ifndef NDEBUG
+#if __has_include(<absl/cleanup/cleanup.h>)
   absl::Cleanup validate = [&] {
     if (!IsValid()) {
       CERR << "Move " + move.ToString(true) +
@@ -603,6 +606,7 @@ bool ChessBoard::ApplyMove(Move move) {
       assert(false);
     }
   };
+#endif
 #endif
   const Square& from = move.from();
   const Square& to = move.to();
