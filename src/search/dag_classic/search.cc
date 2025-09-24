@@ -1618,7 +1618,7 @@ bool SearchWorker::ShouldStopPickingHere(Node* node, bool is_root_node,
   if (is_root_node) return false;
 
   // Stop at draws by repetition.
-  if (repetitions >= 2) return true;
+  if (repetitions >= 1) return true;
 
   // Check if Node and LowNode differ significantly.
   auto low_node = node->GetLowNode().get();
