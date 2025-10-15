@@ -160,6 +160,9 @@ class BlasNetwork : public Network {
   virtual ~BlasNetwork(){};
 
   std::unique_ptr<NetworkComputation> NewComputation() override {
+#ifdef USE_DNNL
+    omp_set_num_threads(threads_);
+#endif
     return std::make_unique<BlasComputation<use_eigen>>(
         this, weights_, policy_head_, value_head_, max_batch_size_, wdl_,
         moves_left_, conv_policy_, default_activation_, smolgen_activation_,
@@ -240,9 +243,6 @@ BlasComputation<use_eigen>::BlasComputation(
       policy_head_(policy_head),
       value_head_(value_head),
       network_(network) {
-#ifdef USE_DNNL
-  omp_set_num_threads(network_->threads_);
-#endif
 }
 
 template <typename T>
