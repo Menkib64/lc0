@@ -63,6 +63,7 @@
 #include "utils/exception.h"
 #include "utils/fp16_utils.h"
 #include "utils/logging.h"
+#include "utils/trace.h"
 
 namespace lczero {
 namespace {
@@ -543,6 +544,7 @@ void OnnxComputation<DataType>::CaptureCudaGraph(std::unique_lock<std::mutex>&& 
 
 template <typename DataType>
 void OnnxComputation<DataType>::ComputeBlocking() {
+  LCTRACE_FUNCTION_SCOPE;
 #ifdef CUDART_VERSION
   if ((network_->provider_ == OnnxProvider::TRT ||
        network_->provider_ == OnnxProvider::CUDA) &&

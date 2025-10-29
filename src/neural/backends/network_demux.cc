@@ -37,6 +37,7 @@
 #include "neural/factory.h"
 #include "neural/shared_params.h"
 #include "utils/atomic_vector.h"
+#include "utils/trace.h"
 
 namespace lczero {
 namespace {
@@ -276,6 +277,7 @@ class DemuxingComputation final : public BackendComputation {
 void DemuxingWork::ProcessResults() { source_->ProcessResults(*this); }
 
 void DemuxingComputation::ProcessResults(const DemuxingWork& work) {
+  LCTRACE_FUNCTION_SCOPE;
   size_t size = work.end_ - work.start_;
   for (size_t i = 0; i < size; ++i) {
     entries_[work.start_ + i].ProcessResult(

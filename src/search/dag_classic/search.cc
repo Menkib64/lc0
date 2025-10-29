@@ -44,6 +44,7 @@
 #include "utils/fastmath.h"
 #include "utils/random.h"
 #include "utils/spinhelper.h"
+#include "utils/trace.h"
 
 #ifndef __has_feature
 #define __has_feature(x) 0
@@ -1851,6 +1852,7 @@ void SearchWorker::ExecuteOneIteration() {
 // 1. Initialize internal structures.
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 void SearchWorker::InitializeIteration() {
+  LCTRACE_FUNCTION_SCOPE;
   cancel_task_.Wait(tid_);
   // Free the old computation before allocating a new one. This works better
   // when backend caches buffer allocations between computations.
@@ -1929,6 +1931,7 @@ int SearchWorker::ExpandCollision(int index, int collisions_left) {
 }
 
 void SearchWorker::GatherMinibatch() {
+  LCTRACE_FUNCTION_SCOPE;
   // Total number of nodes to process.
   int minibatch_size = 0;
   int cur_n = 0;
@@ -2152,6 +2155,7 @@ template <bool starting_from_root>
 std::conditional_t<starting_from_root, std::tuple<int, int>, int>
 SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
                                     const EdgeAndNode& current_best_edge) {
+  LCTRACE_FUNCTION_SCOPE;
   TaskWorkspace* workspace = &GetWorkspace(tid);
   auto& current_path = workspace->current_path;
   auto& history = *workspace->history.back();
@@ -2727,6 +2731,7 @@ void SearchWorker::RunNNComputation() {
 // 5. Retrieve NN computations (and terminal values) into nodes.
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 void SearchWorker::FetchMinibatchResults() {
+  LCTRACE_FUNCTION_SCOPE;
   // Populate NN/cached results, or terminal results, into nodes.
   int i = 0;
   for (auto& node_to_process : state_.minibatch_) {
@@ -2773,6 +2778,7 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process,
 // 6. Propagate the new nodes' information to all their parents in the tree.
 // ~~~~~~~~~~~~~~
 void SearchWorker::DoBackupUpdate() {
+  LCTRACE_FUNCTION_SCOPE;
   // Nodes mutex for doing node updates.
   SharedMutex::Lock lock(search_->nodes_mutex_);
   auto& tc = search_->thread_count_;
@@ -3104,6 +3110,7 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, uint32_t* n_to_fix,
 // 7. Update the Search's status and progress information.
 //~~~~~~~~~~~~~~~~~~~~
 void SearchWorker::UpdateCounters() {
+  LCTRACE_FUNCTION_SCOPE;
   search_->PopulateCommonIterationStats(&iteration_stats_);
   search_->MaybeTriggerStop(iteration_stats_, &latest_time_manager_hints_);
   search_->MaybeOutputInfo(iteration_stats_);
