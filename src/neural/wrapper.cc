@@ -34,6 +34,7 @@
 #include "neural/shared_params.h"
 #include "utils/atomic_vector.h"
 #include "utils/fastmath.h"
+#include "utils/trace.h"
 
 namespace lczero {
 
@@ -151,10 +152,34 @@ class NetworkAsBackendComputation : public BackendComputation {
     for (auto& entry : entries_) computation_->AddInput(std::move(entry.input));
     computation_->ComputeBlocking();
     callback(ComputationEvent::FIRST_BACKEND_IDLE);
+    LCTRACE_FUNCTION_SCOPE;
     for (size_t i = 0; i < entries_.size(); ++i) {
       entries_[i].ProcessResult(*computation_, i,
                                backend_->softmax_policy_temperature_);
     }
+  }
+
+  void SoftmaxPolicy(std::span<float> dst,
+                     const NetworkComputation* computation, int idx) {
+    LCTRACE_FUNCTION_SCOPE;
+    const std::vector<Move>& moves = entries_[idx].legal_moves;
+    const int transform = entries_[idx].transform;
+    // Copy the values to the destination array and compute the maximum.
+    const float max_p = std::accumulate(
+        moves.begin(), moves.end(), -std::numeric_limits<float>::infinity(),
+        [&, counter = 0](float max_p, const Move& move) mutable {
+          return std::max(max_p, dst[counter++] = computation->GetPVal(
+                                     idx, MoveToNNIndex(move, transform)));
+        });
+    // Compute the softmax and compute the total.
+    const float temperature = backend_->softmax_policy_temperature_;
+    float total = std::accumulate(
+        dst.begin(), dst.end(), 0.0f, [&](float total, float& val) {
+          return total + (val = FastExp((val - max_p) * temperature));
+        });
+    const float scale = total > 0.0f ? 1.0f / total : 1.0f;
+    // Scale the values to sum to 1.0.
+    std::for_each(dst.begin(), dst.end(), [&](float& val) { val *= scale; });
   }
 
  private:
