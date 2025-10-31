@@ -67,7 +67,8 @@ void addBias_NCHW(T* c, T* a, T* b, int N, int C, int H, int W,
 // params, also pad/un-pad elements from Batch or Channel dimensions
 template <typename DstType, typename SrcType>
 void convertNCHWtoNHWC(DstType* output_tensor, const SrcType* input_tensor,
-                       int Nin, int Cin, int Nout, int Cout, int H, int W);
+                       int Nin, int Cin, int Nout, int Cout, int H, int W,
+                       cudaStream_t stream);
 
 // Plain data-type conversion (no layout conversion).
 template <typename DstType, typename SrcType>
@@ -83,11 +84,13 @@ void batchNorm(T* output, const T* input, const T* skipInput, int N, int C,
 void expandPlanes_Fp32_NCHW(float* output, const uint64_t* masks,
                             const float* values, int n, cudaStream_t stream);
 
+template <typename IOType>
 void expandPlanes_Fp16_NHWC(half* output, const uint64_t* masks,
-                            const float* values, int n, cudaStream_t stream);
+                            const IOType* values, int n, cudaStream_t stream);
 
+template <typename IOType>
 void expandPlanes_Fp16_NCHW(half* output, const uint64_t* masks,
-                            const float* values, int n, cudaStream_t stream);
+                            const IOType* values, int n, cudaStream_t stream);
 
 // Perform global avg pool.
 template <typename T>
