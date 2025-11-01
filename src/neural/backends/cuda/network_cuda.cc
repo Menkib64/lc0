@@ -172,12 +172,13 @@ class CudaNetworkComputation : public NetworkComputation {
   }
 
   float GetPVal(int sample, int move_id) const override {
-    return inputs_outputs_->op_policy_mem_[sample * kNumOutputPolicy + move_id];
+    return FromType(
+        inputs_outputs_->op_policy_mem_[sample * kNumOutputPolicy + move_id]);
   }
 
   float GetMVal(int sample) const override {
     if (moves_left_) {
-      return inputs_outputs_->op_moves_left_mem_[sample];
+      return FromType(inputs_outputs_->op_moves_left_mem_[sample]);
     }
     return 0.0f;
   }
@@ -724,6 +725,10 @@ class CudaNetwork : public Network {
     auto* opVal = io->op_value_mem_gpu_;
     auto* opMov = io->op_moves_left_mem_gpu_;
 
+    using opPolType = std::remove_reference_t<decltype(opPol[0])>;
+    using opValType = std::remove_reference_t<decltype(opVal[0])>;
+    using opMovType = std::remove_reference_t<decltype(opMov[0])>;
+
     // Figure out if the memory requirment for running the res block would fit
     // in the L2 cache.
     bool enableCacheOpt = false;
@@ -825,7 +830,7 @@ class CudaNetwork : public Network {
           cublas, compute_stream,
           head_offset_pointers);  // Entire Attention policy head except for the
                                   // policy map
-      if (!std::is_same_v<decltype(opPol[0]), DataType>) {
+      if (!std::is_same_v<opPolType, DataType>) {
         network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
                             scratch_size_, nullptr, cublas,
                             compute_stream);  // policy map layer
@@ -848,7 +853,7 @@ class CudaNetwork : public Network {
                           scratch_size_, nullptr, cublas,
                           compute_stream);  // policy conv2
 
-      if (!std::is_same_v<decltype(opPol[0]), DataType>) {
+      if (!std::is_same_v<opPolType, DataType>) {
         network_[l++]->Eval(batchSize, spare1, spare2, nullptr, scratch_mem,
                             scratch_size_, nullptr, cublas,
                             compute_stream);  // policy map layer
@@ -866,7 +871,7 @@ class CudaNetwork : public Network {
                           scratch_size_, nullptr, cublas,
                           compute_stream);  // pol conv
 
-      if (!std::is_same_v<decltype(opPol[0]), DataType>) {
+      if (!std::is_same_v<opPolType, DataType>) {
         network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
                             scratch_size_, nullptr, cublas,
                             compute_stream);  // pol FC
@@ -891,7 +896,7 @@ class CudaNetwork : public Network {
         cudaMemcpyDeviceToHost, download_stream));
 
     // value head
-    if (!std::is_same_v<decltype(opVal[0]), DataType>) {
+    if (!std::is_same_v<opValType, DataType>) {
       network_[l++]->Eval(batchSize, spare1, flow, spare2, scratch_mem,
                           scratch_size_, nullptr, cublas,
                           compute_stream);  // value head
@@ -932,7 +937,7 @@ class CudaNetwork : public Network {
                           compute_stream);  // moves FC1
 
       // Moves left FC2
-      if (!std::is_same_v<decltype(opMov[0]), DataType>) {
+      if (!std::is_same_v<opMovType, DataType>) {
         // TODO: consider fusing the bias-add of FC2 with format conversion.
         network_[l++]->Eval(batchSize, spare1, spare2, nullptr, scratch_mem,
                             scratch_size_, nullptr, cublas, compute_stream);
