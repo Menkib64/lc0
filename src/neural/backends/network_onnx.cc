@@ -567,6 +567,7 @@ void OnnxComputation<DataType>::ComputeBlocking() {
         ReportCUDAErrors(cudaGraphLaunch(graph, inputs_outputs_->exec_stream_));
       }
     }
+    LCTRACE_FUNCTION_SCOPE;
     if (new_capture) {
       ReportCUDAErrors(cudaEventSynchronize(
           inputs_outputs_->outputs_download_before_capture_event_));
@@ -626,6 +627,7 @@ void OnnxComputation<DataType>::ComputeBlocking() {
 
 template <typename DataType>
 void OnnxComputation<DataType>::ComputeBlockingImpl() {
+  LCTRACE_FUNCTION_SCOPE;
   int batch_size = network_->batch_size_;
   if (batch_size < 0) {
     batch_size =

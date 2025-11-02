@@ -2005,6 +2005,7 @@ void SearchWorker::GatherMinibatch() {
     minibatch_size += non_collisions;
 
     if (!state_.ooobatch_.empty()) {
+      LCTRACE_FUNCTION_SCOPE;
       // If there was any OOO, revert 'all' new collisions - it isn't possible
       // to identify exactly which ones are afterwards and only prune those.
       // This may remove too many items, but hopefully most of the time they
