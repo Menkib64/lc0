@@ -31,6 +31,7 @@
 #include "search/register.h"
 #include "search/search.h"
 #include "neural/shared_params.h"
+#include "utils/numa.h"
 #include "utils/trace.h"
 
 namespace lczero {
@@ -44,6 +45,11 @@ const OptionId kThreadsOptionId{
          "Number of (CPU) worker threads to use, 0 for the backend default.",
      .short_flag = 't',
      .visibility = OptionId::kAlwaysVisible}};
+const OptionId kSearchSocketOptionId{
+    {.long_flag = "search-numa-socket",
+     .uci_option = "SearchNUMASocket",
+     .help_text = "The NUMA socket to use for the search threads.",
+     .visibility = OptionId::kProOnly}};
 const OptionId kClearTree{
     {.long_flag = "",
      .uci_option = "ClearTree",
@@ -60,7 +66,8 @@ const OptionId kHashId{{.long_flag = "hash",
 class DagClassicSearch : public SearchBase {
  public:
   DagClassicSearch(UciResponder* responder, const OptionsDict* options)
-      : SearchBase(responder), options_(options) {}
+      : SearchBase(responder), options_(options) {
+  }
   ~DagClassicSearch() { search_.reset(); }
 
  private:
@@ -177,7 +184,8 @@ void DagClassicSearch::StartSearch(const GoParams& params) {
 #endif
   LOGFILE << "Timer started at "
           << FormatTime(SteadyClockToSystemClock(*move_start_time_));
-  search_->StartThreads(options_->Get<int>(kThreadsOptionId));
+  search_->StartThreads(options_->Get<int>(kSearchSocketOptionId),
+                        options_->Get<int>(kThreadsOptionId));
 }
 
 class DagClassicSearchFactory : public SearchFactory {
@@ -193,6 +201,7 @@ class DagClassicSearchFactory : public SearchFactory {
 #ifdef FIX_TT
     parser->Add<IntOption>(kHashId, 0, 2000) = 50;
 #endif
+    parser->Add<IntOption>(kSearchSocketOptionId, 0, 512) = 0;
     SearchParams::Populate(parser);
     classic::PopulateTimeManagementOptions(classic::RunType::kUci, parser);
 
