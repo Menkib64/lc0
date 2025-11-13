@@ -38,6 +38,7 @@
 #include "utils/commandline.h"
 #include "utils/esc_codes.h"
 #include "utils/logging.h"
+#include "utils/numa.h"
 #include "utils/trace.h"
 #include "version.h"
 
@@ -87,6 +88,7 @@ int main(int argc, const char** argv) {
        << " built " << __DATE__;
 
   try {
+    Numa::Init();
     InitializeMagicBitboards();
 
     CommandLine::Init(argc, argv);
