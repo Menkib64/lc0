@@ -67,8 +67,8 @@ inline std::string PtrToStr(T* ptr) {
 
 // CUDA Runtime API Wrappers
 
-template <typename T>
-inline cudaError_t cudaMalloc(T** devPtr, size_t size) {
+template <typename T, typename S>
+inline cudaError_t cudaMalloc(T** devPtr, S size) {
   CUDA_DEBUG_LOG("cudaMalloc(devPtr=" << PtrToStr(devPtr) 
                  << ", size=" << size << ")");
   cudaError_t result = ::cudaMalloc(reinterpret_cast<void**>(devPtr), size);
@@ -88,7 +88,7 @@ inline cudaError_t cudaFree(T* devPtr) {
 template <typename T1, typename T2>
 inline cudaError_t cudaMemcpy(T1* dst, const T2* src, size_t count, 
                                cudaMemcpyKind kind) {
-  const char* kind_str = 
+  [[maybe_unused]] const char* kind_str = 
       (kind == cudaMemcpyHostToDevice) ? "HostToDevice" :
       (kind == cudaMemcpyDeviceToHost) ? "DeviceToHost" :
       (kind == cudaMemcpyDeviceToDevice) ? "DeviceToDevice" :
@@ -105,7 +105,7 @@ inline cudaError_t cudaMemcpy(T1* dst, const T2* src, size_t count,
 template <typename T1, typename T2>
 inline cudaError_t cudaMemcpyAsync(T1* dst, const T2* src, size_t count,
                                    cudaMemcpyKind kind, cudaStream_t stream) {
-  const char* kind_str = 
+  [[maybe_unused]] const char* kind_str = 
       (kind == cudaMemcpyHostToDevice) ? "HostToDevice" :
       (kind == cudaMemcpyDeviceToHost) ? "DeviceToHost" :
       (kind == cudaMemcpyDeviceToDevice) ? "DeviceToDevice" :
@@ -130,7 +130,7 @@ inline cudaError_t cudaMemset(T* devPtr, int value, size_t count) {
   return result;
 }
 
-inline cudaError_t cudaStreamCreateWithFlags(cudaStream_t* pStream, 
+template <typename Stream> inline cudaError_t cudaStreamCreateWithFlags(Stream* pStream, 
                                               unsigned int flags) {
   CUDA_DEBUG_LOG("cudaStreamCreateWithFlags(pStream=" << PtrToStr(pStream)
                  << ", flags=" << flags << ")");
@@ -140,21 +140,21 @@ inline cudaError_t cudaStreamCreateWithFlags(cudaStream_t* pStream,
   return result;
 }
 
-inline cudaError_t cudaStreamDestroy(cudaStream_t stream) {
+template <typename Stream> inline cudaError_t cudaStreamDestroy(Stream stream) {
   CUDA_DEBUG_LOG("cudaStreamDestroy(stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaStreamDestroy(stream);
   CUDA_DEBUG_LOG("cudaStreamDestroy -> " << cudaGetErrorString(result));
   return result;
 }
 
-inline cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
+template <typename Stream> inline cudaError_t cudaStreamSynchronize(Stream stream) {
   CUDA_DEBUG_LOG("cudaStreamSynchronize(stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaStreamSynchronize(stream);
   CUDA_DEBUG_LOG("cudaStreamSynchronize -> " << cudaGetErrorString(result));
   return result;
 }
 
-inline cudaError_t cudaStreamSetAttribute(cudaStream_t stream,
+template <typename Stream> inline cudaError_t cudaStreamSetAttribute(Stream stream,
                                            cudaStreamAttrID attr,
                                            const cudaStreamAttrValue* value) {
   CUDA_DEBUG_LOG("cudaStreamSetAttribute(stream=" << PtrToStr(stream)
@@ -164,7 +164,7 @@ inline cudaError_t cudaStreamSetAttribute(cudaStream_t stream,
   return result;
 }
 
-inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+template <typename Stream> inline cudaError_t cudaStreamWaitEvent(Stream stream, cudaEvent_t event,
                                         unsigned int flags) {
   CUDA_DEBUG_LOG("cudaStreamWaitEvent(stream=" << PtrToStr(stream)
                  << ", event=" << PtrToStr(event)
@@ -174,7 +174,7 @@ inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
   return result;
 }
 
-inline cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event, 
+template <typename Event> inline cudaError_t cudaEventCreateWithFlags(Event* event, 
                                              unsigned int flags) {
   CUDA_DEBUG_LOG("cudaEventCreateWithFlags(event=" << PtrToStr(event)
                  << ", flags=" << flags << ")");
@@ -184,14 +184,14 @@ inline cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event,
   return result;
 }
 
-inline cudaError_t cudaEventDestroy(cudaEvent_t event) {
+template <typename Event> inline cudaError_t cudaEventDestroy(Event event) {
   CUDA_DEBUG_LOG("cudaEventDestroy(event=" << PtrToStr(event) << ")");
   cudaError_t result = ::cudaEventDestroy(event);
   CUDA_DEBUG_LOG("cudaEventDestroy -> " << cudaGetErrorString(result));
   return result;
 }
 
-inline cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
+template <typename Stream> inline cudaError_t cudaEventRecord(cudaEvent_t event, Stream stream) {
   CUDA_DEBUG_LOG("cudaEventRecord(event=" << PtrToStr(event)
                  << ", stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaEventRecord(event, stream);
@@ -199,7 +199,7 @@ inline cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
   return result;
 }
 
-inline cudaError_t cudaEventRecordWithFlags(cudaEvent_t event, 
+template <typename Event> inline cudaError_t cudaEventRecordWithFlags(Event event, 
                                              cudaStream_t stream,
                                              unsigned int flags) {
   CUDA_DEBUG_LOG("cudaEventRecordWithFlags(event=" << PtrToStr(event)
@@ -210,7 +210,7 @@ inline cudaError_t cudaEventRecordWithFlags(cudaEvent_t event,
   return result;
 }
 
-inline cudaError_t cudaEventSynchronize(cudaEvent_t event) {
+template <typename Event> inline cudaError_t cudaEventSynchronize(Event event) {
   CUDA_DEBUG_LOG("cudaEventSynchronize(event=" << PtrToStr(event) << ")");
   cudaError_t result = ::cudaEventSynchronize(event);
   CUDA_DEBUG_LOG("cudaEventSynchronize -> " << cudaGetErrorString(result));
@@ -225,14 +225,14 @@ inline cudaError_t cudaGetDeviceCount(int* count) {
   return result;
 }
 
-inline cudaError_t cudaSetDevice(int device) {
+template <typename Int> inline cudaError_t cudaSetDevice(Int device) {
   CUDA_DEBUG_LOG("cudaSetDevice(device=" << device << ")");
   cudaError_t result = ::cudaSetDevice(device);
   CUDA_DEBUG_LOG("cudaSetDevice -> " << cudaGetErrorString(result));
   return result;
 }
 
-inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
+template <typename Int> inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, Int device) {
   CUDA_DEBUG_LOG("cudaGetDeviceProperties(prop=" << PtrToStr(prop)
                  << ", device=" << device << ")");
   cudaError_t result = ::cudaGetDeviceProperties(prop, device);
@@ -241,8 +241,8 @@ inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
   return result;
 }
 
-inline cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr,
-                                           int device) {
+template <typename Int> inline cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr,
+                                           Int device) {
   CUDA_DEBUG_LOG("cudaDeviceGetAttribute(value=" << PtrToStr(value)
                  << ", attr=" << attr
                  << ", device=" << device << ")");
@@ -250,16 +250,6 @@ inline cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr,
   CUDA_DEBUG_LOG("cudaDeviceGetAttribute -> " << cudaGetErrorString(result)
                  << ", *value=" << *value);
   return result;
-}
-
-inline cudaError_t cudaGetLastError() {
-  cudaError_t result = ::cudaGetLastError();
-  CUDA_DEBUG_LOG("cudaGetLastError() -> " << cudaGetErrorString(result));
-  return result;
-}
-
-inline const char* cudaGetErrorString(cudaError_t error) {
-  return ::cudaGetErrorString(error);
 }
 
 inline cudaError_t cudaRuntimeGetVersion(int* runtimeVersion) {
@@ -300,7 +290,7 @@ inline cudaError_t cudaCtxResetPersistingL2Cache() {
 
 // cuBLAS API Wrappers
 
-inline cublasStatus_t cublasCreate(cublasHandle_t* handle) {
+template <typename Handle> inline cublasStatus_t cublasCreate(Handle* handle) {
   CUDA_DEBUG_LOG("cublasCreate(handle=" << PtrToStr(handle) << ")");
   cublasStatus_t result = ::cublasCreate(handle);
   CUDA_DEBUG_LOG("cublasCreate -> " << static_cast<int>(result)
@@ -308,14 +298,14 @@ inline cublasStatus_t cublasCreate(cublasHandle_t* handle) {
   return result;
 }
 
-inline cublasStatus_t cublasDestroy(cublasHandle_t handle) {
+template <typename Handle> inline cublasStatus_t cublasDestroy(Handle handle) {
   CUDA_DEBUG_LOG("cublasDestroy(handle=" << PtrToStr(handle) << ")");
   cublasStatus_t result = ::cublasDestroy(handle);
   CUDA_DEBUG_LOG("cublasDestroy -> " << static_cast<int>(result));
   return result;
 }
 
-inline cublasStatus_t cublasSetStream(cublasHandle_t handle, 
+template <typename Handle> inline cublasStatus_t cublasSetStream(Handle handle, 
                                        cudaStream_t streamId) {
   CUDA_DEBUG_LOG("cublasSetStream(handle=" << PtrToStr(handle)
                  << ", streamId=" << PtrToStr(streamId) << ")");
@@ -324,7 +314,7 @@ inline cublasStatus_t cublasSetStream(cublasHandle_t handle,
   return result;
 }
 
-inline cublasStatus_t cublasSetMathMode(cublasHandle_t handle, 
+template <typename Handle> inline cublasStatus_t cublasSetMathMode(Handle handle, 
                                          cublasMath_t mode) {
   CUDA_DEBUG_LOG("cublasSetMathMode(handle=" << PtrToStr(handle)
                  << ", mode=" << static_cast<int>(mode) << ")");
@@ -333,7 +323,7 @@ inline cublasStatus_t cublasSetMathMode(cublasHandle_t handle,
   return result;
 }
 
-inline cublasStatus_t cublasSgemm(cublasHandle_t handle, cublasOperation_t transa,
+template <typename Handle> inline cublasStatus_t cublasSgemm(Handle handle, cublasOperation_t transa,
                                    cublasOperation_t transb, int m, int n, int k,
                                    const float* alpha, const float* A, int lda,
                                    const float* B, int ldb, const float* beta,
@@ -351,7 +341,7 @@ inline cublasStatus_t cublasSgemm(cublasHandle_t handle, cublasOperation_t trans
   return result;
 }
 
-inline cublasStatus_t cublasHgemm(cublasHandle_t handle, cublasOperation_t transa,
+template <typename Handle> inline cublasStatus_t cublasHgemm(Handle handle, cublasOperation_t transa,
                                    cublasOperation_t transb, int m, int n, int k,
                                    const __half* alpha, const __half* A, int lda,
                                    const __half* B, int ldb, const __half* beta,
@@ -368,7 +358,7 @@ inline cublasStatus_t cublasHgemm(cublasHandle_t handle, cublasOperation_t trans
   return result;
 }
 
-inline cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
+template <typename Handle> inline cublasStatus_t cublasSgemmBatched(Handle handle,
                                           cublasOperation_t transa,
                                           cublasOperation_t transb,
                                           int m, int n, int k,
@@ -388,7 +378,7 @@ inline cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
   return result;
 }
 
-inline cublasStatus_t cublasHgemmBatched(cublasHandle_t handle,
+template <typename Handle> inline cublasStatus_t cublasHgemmBatched(Handle handle,
                                           cublasOperation_t transa,
                                           cublasOperation_t transb,
                                           int m, int n, int k,
@@ -408,7 +398,7 @@ inline cublasStatus_t cublasHgemmBatched(cublasHandle_t handle,
   return result;
 }
 
-inline cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t handle,
+template <typename Handle> inline cublasStatus_t cublasSgemmStridedBatched(Handle handle,
                                                  cublasOperation_t transa,
                                                  cublasOperation_t transb,
                                                  int m, int n, int k,
@@ -467,7 +457,7 @@ inline cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
 
 #ifdef USE_CUDNN
 
-inline cudnnStatus_t cudnnCreate(cudnnHandle_t* handle) {
+template <typename Handle> inline cudnnStatus_t cudnnCreate(Handle* handle) {
   CUDA_DEBUG_LOG("cudnnCreate(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnCreate(handle);
   CUDA_DEBUG_LOG("cudnnCreate -> " << cudnnGetErrorString(result)
@@ -475,14 +465,14 @@ inline cudnnStatus_t cudnnCreate(cudnnHandle_t* handle) {
   return result;
 }
 
-inline cudnnStatus_t cudnnDestroy(cudnnHandle_t handle) {
+template <typename Handle> inline cudnnStatus_t cudnnDestroy(Handle handle) {
   CUDA_DEBUG_LOG("cudnnDestroy(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnDestroy(handle);
   CUDA_DEBUG_LOG("cudnnDestroy -> " << cudnnGetErrorString(result));
   return result;
 }
 
-inline cudnnStatus_t cudnnSetStream(cudnnHandle_t handle, cudaStream_t streamId) {
+template <typename Stream> inline cudnnStatus_t cudnnSetStream(cudnnHandle_t handle, Stream streamId) {
   CUDA_DEBUG_LOG("cudnnSetStream(handle=" << PtrToStr(handle)
                  << ", streamId=" << PtrToStr(streamId) << ")");
   cudnnStatus_t result = ::cudnnSetStream(handle, streamId);
@@ -496,11 +486,7 @@ inline size_t cudnnGetVersion() {
   return version;
 }
 
-inline const char* cudnnGetErrorString(cudnnStatus_t status) {
-  return ::cudnnGetErrorString(status);
-}
-
-inline cudnnStatus_t cudnnCreateTensorDescriptor(cudnnTensorDescriptor_t* tensorDesc) {
+template <typename Tensor> inline cudnnStatus_t cudnnCreateTensorDescriptor(Tensor* tensorDesc) {
   CUDA_DEBUG_LOG("cudnnCreateTensorDescriptor(tensorDesc=" 
                  << PtrToStr(tensorDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateTensorDescriptor(tensorDesc);
@@ -509,7 +495,7 @@ inline cudnnStatus_t cudnnCreateTensorDescriptor(cudnnTensorDescriptor_t* tensor
   return result;
 }
 
-inline cudnnStatus_t cudnnDestroyTensorDescriptor(cudnnTensorDescriptor_t tensorDesc) {
+template <typename Tensor> inline cudnnStatus_t cudnnDestroyTensorDescriptor(Tensor tensorDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyTensorDescriptor(tensorDesc=" 
                  << PtrToStr(tensorDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyTensorDescriptor(tensorDesc);
@@ -517,7 +503,7 @@ inline cudnnStatus_t cudnnDestroyTensorDescriptor(cudnnTensorDescriptor_t tensor
   return result;
 }
 
-inline cudnnStatus_t cudnnSetTensor4dDescriptor(cudnnTensorDescriptor_t tensorDesc,
+template <typename Tensor> inline cudnnStatus_t cudnnSetTensor4dDescriptor(Tensor tensorDesc,
                                                   cudnnTensorFormat_t format,
                                                   cudnnDataType_t dataType,
                                                   int n, int c, int h, int w) {
@@ -532,7 +518,7 @@ inline cudnnStatus_t cudnnSetTensor4dDescriptor(cudnnTensorDescriptor_t tensorDe
   return result;
 }
 
-inline cudnnStatus_t cudnnCreateFilterDescriptor(cudnnFilterDescriptor_t* filterDesc) {
+template <typename Filter> inline cudnnStatus_t cudnnCreateFilterDescriptor(Filter* filterDesc) {
   CUDA_DEBUG_LOG("cudnnCreateFilterDescriptor(filterDesc=" 
                  << PtrToStr(filterDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateFilterDescriptor(filterDesc);
@@ -541,7 +527,7 @@ inline cudnnStatus_t cudnnCreateFilterDescriptor(cudnnFilterDescriptor_t* filter
   return result;
 }
 
-inline cudnnStatus_t cudnnDestroyFilterDescriptor(cudnnFilterDescriptor_t filterDesc) {
+template <typename Filter> inline cudnnStatus_t cudnnDestroyFilterDescriptor(Filter filterDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyFilterDescriptor(filterDesc=" 
                  << PtrToStr(filterDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyFilterDescriptor(filterDesc);
@@ -549,7 +535,7 @@ inline cudnnStatus_t cudnnDestroyFilterDescriptor(cudnnFilterDescriptor_t filter
   return result;
 }
 
-inline cudnnStatus_t cudnnSetFilter4dDescriptor(cudnnFilterDescriptor_t filterDesc,
+template <typename Filter> inline cudnnStatus_t cudnnSetFilter4dDescriptor(Filter filterDesc,
                                                   cudnnDataType_t dataType,
                                                   cudnnTensorFormat_t format,
                                                   int k, int c, int h, int w) {
@@ -564,8 +550,8 @@ inline cudnnStatus_t cudnnSetFilter4dDescriptor(cudnnFilterDescriptor_t filterDe
   return result;
 }
 
-inline cudnnStatus_t cudnnCreateConvolutionDescriptor(
-    cudnnConvolutionDescriptor_t* convDesc) {
+template <typename Convolution> inline cudnnStatus_t cudnnCreateConvolutionDescriptor(
+    Convolution* convDesc) {
   CUDA_DEBUG_LOG("cudnnCreateConvolutionDescriptor(convDesc=" 
                  << PtrToStr(convDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateConvolutionDescriptor(convDesc);
@@ -574,8 +560,8 @@ inline cudnnStatus_t cudnnCreateConvolutionDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnDestroyConvolutionDescriptor(
-    cudnnConvolutionDescriptor_t convDesc) {
+template <typename Convolution> inline cudnnStatus_t cudnnDestroyConvolutionDescriptor(
+    Convolution convDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyConvolutionDescriptor(convDesc=" 
                  << PtrToStr(convDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyConvolutionDescriptor(convDesc);
@@ -584,8 +570,8 @@ inline cudnnStatus_t cudnnDestroyConvolutionDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnSetConvolution2dDescriptor(
-    cudnnConvolutionDescriptor_t convDesc,
+template <typename Convolution> inline cudnnStatus_t cudnnSetConvolution2dDescriptor(
+    Convolution convDesc,
     int pad_h, int pad_w, int u, int v, int dilation_h, int dilation_w,
     cudnnConvolutionMode_t mode, cudnnDataType_t computeType) {
   CUDA_DEBUG_LOG("cudnnSetConvolution2dDescriptor(convDesc=" << PtrToStr(convDesc)
@@ -602,8 +588,8 @@ inline cudnnStatus_t cudnnSetConvolution2dDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnSetConvolutionMathType(
-    cudnnConvolutionDescriptor_t convDesc, cudnnMathType_t mathType) {
+template <typename Convolution> inline cudnnStatus_t cudnnSetConvolutionMathType(
+    Convolution convDesc, cudnnMathType_t mathType) {
   CUDA_DEBUG_LOG("cudnnSetConvolutionMathType(convDesc=" << PtrToStr(convDesc)
                  << ", mathType=" << static_cast<int>(mathType) << ")");
   cudnnStatus_t result = ::cudnnSetConvolutionMathType(convDesc, mathType);
@@ -611,8 +597,8 @@ inline cudnnStatus_t cudnnSetConvolutionMathType(
   return result;
 }
 
-inline cudnnStatus_t cudnnCreateActivationDescriptor(
-    cudnnActivationDescriptor_t* activationDesc) {
+template <typename Activation> inline cudnnStatus_t cudnnCreateActivationDescriptor(
+    Activation* activationDesc) {
   CUDA_DEBUG_LOG("cudnnCreateActivationDescriptor(activationDesc=" 
                  << PtrToStr(activationDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateActivationDescriptor(activationDesc);
@@ -621,8 +607,8 @@ inline cudnnStatus_t cudnnCreateActivationDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnDestroyActivationDescriptor(
-    cudnnActivationDescriptor_t activationDesc) {
+template <typename Activation> inline cudnnStatus_t cudnnDestroyActivationDescriptor(
+    Activation activationDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyActivationDescriptor(activationDesc=" 
                  << PtrToStr(activationDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyActivationDescriptor(activationDesc);
@@ -631,8 +617,8 @@ inline cudnnStatus_t cudnnDestroyActivationDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnSetActivationDescriptor(
-    cudnnActivationDescriptor_t activationDesc,
+template <typename Activation> inline cudnnStatus_t cudnnSetActivationDescriptor(
+    Activation activationDesc,
     cudnnActivationMode_t mode, cudnnNanPropagation_t reluNanOpt, double coef) {
   CUDA_DEBUG_LOG("cudnnSetActivationDescriptor(activationDesc=" 
                  << PtrToStr(activationDesc)
@@ -645,8 +631,8 @@ inline cudnnStatus_t cudnnSetActivationDescriptor(
   return result;
 }
 
-inline cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize(
-    cudnnHandle_t handle,
+template <typename Handle> inline cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize(
+    Handle handle,
     const cudnnTensorDescriptor_t xDesc,
     const cudnnFilterDescriptor_t wDesc,
     const cudnnConvolutionDescriptor_t convDesc,
