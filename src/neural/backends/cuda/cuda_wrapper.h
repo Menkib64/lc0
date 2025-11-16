@@ -488,8 +488,12 @@ inline cublasStatus_t cublasSgemm_wrapper(cublasHandle_t handle, cublasOperation
                  << ", transa=" << static_cast<int>(transa)
                  << ", transb=" << static_cast<int>(transb)
                  << ", m=" << m << ", n=" << n << ", k=" << k
-                 << ", alpha=" << *alpha << ", lda=" << lda
-                 << ", ldb=" << ldb << ", beta=" << *beta
+                 << ", alpha=" << *alpha
+                 << ", A=" << PtrToStr(A)
+                 << ", lda=" << lda
+                 << ", B=" << PtrToStr(B)
+                 << ", ldb=" << ldb
+                 << ", C=" << PtrToStr(C)
                  << ", ldc=" << ldc << ")");
   cublasStatus_t result = ::cublasSgemm(handle, transa, transb, m, n, k,
                                         alpha, A, lda, B, ldb, beta, C, ldc);
@@ -508,8 +512,12 @@ inline cublasStatus_t cublasHgemm_wrapper(cublasHandle_t handle, cublasOperation
                  << ", transa=" << static_cast<int>(transa)
                  << ", transb=" << static_cast<int>(transb)
                  << ", m=" << m << ", n=" << n << ", k=" << k
-                 << ", lda=" << lda << ", ldb=" << ldb
-                 << ", ldc=" << ldc << ")");
+                 << ", A=" << PtrToStr(A)
+                 << ", lda=" << lda
+                 << ", B=" << PtrToStr(B)
+                 << ", ldb=" << ldb
+                 << ", C=" << PtrToStr(C)
+                 << ", ldc=" << ldc);
   cublasStatus_t result = ::cublasHgemm(handle, transa, transb, m, n, k,
                                         alpha, A, lda, B, ldb, beta, C, ldc);
   CUDA_DEBUG_LOG("cublasHgemm -> " << static_cast<int>(result));
@@ -529,6 +537,12 @@ inline cublasStatus_t cublasSgemmBatched_wrapper(cublasHandle_t handle,
                                           int batchCount) {
   CUDA_DEBUG_LOG("cublasSgemmBatched(handle=" << PtrToStr(handle)
                  << ", m=" << m << ", n=" << n << ", k=" << k
+                 << ", A=" << PtrToStr(Aarray)
+                 << ", lda=" << lda
+                 << ", B=" << PtrToStr(Barray)
+                 << ", ldb=" << ldb
+                 << ", C=" << PtrToStr(Carray)
+                 << ", ldc=" << ldc 
                  << ", batchCount=" << batchCount << ")");
   cublasStatus_t result = ::cublasSgemmBatched(handle, transa, transb, m, n, k,
                                                alpha, Aarray, lda, Barray, ldb,
@@ -550,6 +564,12 @@ inline cublasStatus_t cublasHgemmBatched_wrapper(cublasHandle_t handle,
                                           int batchCount) {
   CUDA_DEBUG_LOG("cublasHgemmBatched(handle=" << PtrToStr(handle)
                  << ", m=" << m << ", n=" << n << ", k=" << k
+                 << ", A=" << PtrToStr(Aarray)
+                 << ", lda=" << lda
+                 << ", B=" << PtrToStr(Barray)
+                 << ", ldb=" << ldb
+                 << ", C=" << PtrToStr(Carray)
+                 << ", ldc=" << ldc
                  << ", batchCount=" << batchCount << ")");
   cublasStatus_t result = ::cublasHgemmBatched(handle, transa, transb, m, n, k,
                                                alpha, Aarray, lda, Barray, ldb,
@@ -574,6 +594,12 @@ inline cublasStatus_t cublasSgemmStridedBatched_wrapper(cublasHandle_t handle,
                                                  int batchCount) {
   CUDA_DEBUG_LOG("cublasSgemmStridedBatched(handle=" << PtrToStr(handle)
                  << ", m=" << m << ", n=" << n << ", k=" << k
+                 << ", A=" << PtrToStr(A)
+                 << ", lda=" << lda << ", strideA=" << strideA
+                 << ", B=" << PtrToStr(B)
+                 << ", ldb=" << ldb << ", strideB=" << strideB
+                 << ", C=" << PtrToStr(C)
+                 << ", ldc=" << ldc << ", strideC=" << strideC
                  << ", batchCount=" << batchCount << ")");
   cublasStatus_t result = ::cublasSgemmStridedBatched(handle, transa, transb,
                                                       m, n, k, alpha, A, lda,
@@ -603,6 +629,15 @@ inline cublasStatus_t cublasGemmStridedBatchedEx_wrapper(cublasHandle_t handle,
                                                   cublasGemmAlgo_t algo) {
   CUDA_DEBUG_LOG("cublasGemmStridedBatchedEx(handle=" << PtrToStr(handle)
                  << ", m=" << m << ", n=" << n << ", k=" << k
+                 << ", Atype=" << static_cast<int>(Atype)
+                 << ", A=" << PtrToStr(A)
+                 << ", lda=" << lda << ", strideA=" << strideA
+                 << ", Btype=" << static_cast<int>(Btype)
+                 << ", B=" << PtrToStr(B)
+                 << ", ldb=" << ldb << ", strideB=" << strideB
+                 << ", Ctype=" << static_cast<int>(Ctype)
+                 << ", C=" << PtrToStr(C)
+                 << ", ldc=" << ldc << ", strideC=" << strideC
                  << ", batchCount=" << batchCount << ")");
   cublasStatus_t result = ::cublasGemmStridedBatchedEx(handle, transa, transb,
                                                        m, n, k, alpha, A, Atype,
