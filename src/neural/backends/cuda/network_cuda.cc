@@ -632,9 +632,7 @@ class CudaNetwork : public Network {
         comp.CaptureGraph(std::move(lock));
       }
     };
-    std::thread t2(allocateCudaGraphs);
     allocateCudaGraphs();
-    t2.join();
   }
 
   std::unique_lock<std::mutex> LockEval() {
@@ -1223,7 +1221,6 @@ void CudaNetworkComputation<DataType>::CaptureGraph(
   auto capture = network_->BeginCapture(*inputs_outputs_);
   network_->forwardEval(inputs_outputs_.get(), GetBatchSize(), true);
   capture.EndCapture();
-  if (lock.owns_lock()) lock.unlock();
   inputs_outputs_->cuda_graphs_[GetBatchSize() - 1] = capture;
 }
 

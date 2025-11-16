@@ -1176,7 +1176,6 @@ void CudnnNetworkComputation<DataType>::CaptureGraph(
   CudaGraphCapture capture = network_->BeginCapture(*inputs_outputs_);
   network_->forwardEval(inputs_outputs_.get(), GetBatchSize(), true);
   capture.EndCapture();
-  if (lock.owns_lock()) lock.unlock();
   inputs_outputs_->cuda_graphs_[GetBatchSize() - 1] = capture;
 }
 
