@@ -67,23 +67,26 @@ inline std::string PtrToStr(T* ptr) {
 
 // CUDA Runtime API Wrappers
 
-inline cudaError_t cudaMalloc(void** devPtr, size_t size) {
+template <typename T>
+inline cudaError_t cudaMalloc(T** devPtr, size_t size) {
   CUDA_DEBUG_LOG("cudaMalloc(devPtr=" << PtrToStr(devPtr) 
                  << ", size=" << size << ")");
-  cudaError_t result = ::cudaMalloc(devPtr, size);
+  cudaError_t result = ::cudaMalloc(reinterpret_cast<void**>(devPtr), size);
   CUDA_DEBUG_LOG("cudaMalloc -> " << cudaGetErrorString(result) 
                  << ", *devPtr=" << PtrToStr(*devPtr));
   return result;
 }
 
-inline cudaError_t cudaFree(void* devPtr) {
+template <typename T>
+inline cudaError_t cudaFree(T* devPtr) {
   CUDA_DEBUG_LOG("cudaFree(devPtr=" << PtrToStr(devPtr) << ")");
   cudaError_t result = ::cudaFree(devPtr);
   CUDA_DEBUG_LOG("cudaFree -> " << cudaGetErrorString(result));
   return result;
 }
 
-inline cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, 
+template <typename T1, typename T2>
+inline cudaError_t cudaMemcpy(T1* dst, const T2* src, size_t count, 
                                cudaMemcpyKind kind) {
   const char* kind_str = 
       (kind == cudaMemcpyHostToDevice) ? "HostToDevice" :
@@ -99,7 +102,8 @@ inline cudaError_t cudaMemcpy(void* dst, const void* src, size_t count,
   return result;
 }
 
-inline cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count,
+template <typename T1, typename T2>
+inline cudaError_t cudaMemcpyAsync(T1* dst, const T2* src, size_t count,
                                    cudaMemcpyKind kind, cudaStream_t stream) {
   const char* kind_str = 
       (kind == cudaMemcpyHostToDevice) ? "HostToDevice" :
@@ -116,7 +120,8 @@ inline cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count,
   return result;
 }
 
-inline cudaError_t cudaMemset(void* devPtr, int value, size_t count) {
+template <typename T>
+inline cudaError_t cudaMemset(T* devPtr, int value, size_t count) {
   CUDA_DEBUG_LOG("cudaMemset(devPtr=" << PtrToStr(devPtr)
                  << ", value=" << value
                  << ", count=" << count << ")");
@@ -275,12 +280,13 @@ inline cudaError_t cudaDriverGetVersion(int* driverVersion) {
   return result;
 }
 
-inline cudaError_t cudaFuncSetAttribute(const void* func, cudaFuncAttribute attr,
+template <typename T>
+inline cudaError_t cudaFuncSetAttribute(const T* func, cudaFuncAttribute attr,
                                          int value) {
   CUDA_DEBUG_LOG("cudaFuncSetAttribute(func=" << PtrToStr(func)
                  << ", attr=" << attr
                  << ", value=" << value << ")");
-  cudaError_t result = ::cudaFuncSetAttribute(func, attr, value);
+  cudaError_t result = ::cudaFuncSetAttribute(reinterpret_cast<const void*>(func), attr, value);
   CUDA_DEBUG_LOG("cudaFuncSetAttribute -> " << cudaGetErrorString(result));
   return result;
 }
@@ -427,17 +433,18 @@ inline cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t handle,
   return result;
 }
 
+template <typename T1, typename T2, typename T3, typename T4>
 inline cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
                                                   cublasOperation_t transa,
                                                   cublasOperation_t transb,
                                                   int m, int n, int k,
-                                                  const void* alpha,
-                                                  const void* A, cudaDataType Atype,
+                                                  const T1* alpha,
+                                                  const T2* A, cudaDataType Atype,
                                                   int lda, long long int strideA,
-                                                  const void* B, cudaDataType Btype,
+                                                  const T3* B, cudaDataType Btype,
                                                   int ldb, long long int strideB,
-                                                  const void* beta,
-                                                  void* C, cudaDataType Ctype,
+                                                  const T1* beta,
+                                                  T4* C, cudaDataType Ctype,
                                                   int ldc, long long int strideC,
                                                   int batchCount,
                                                   cublasComputeType_t computeType,
@@ -656,16 +663,17 @@ inline cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize(
   return result;
 }
 
+template <typename T1, typename T2, typename T3, typename T4, typename T5>
 inline cudnnStatus_t cudnnConvolutionForward(
     cudnnHandle_t handle,
-    const void* alpha,
-    const cudnnTensorDescriptor_t xDesc, const void* x,
-    const cudnnFilterDescriptor_t wDesc, const void* w,
+    const T1* alpha,
+    const cudnnTensorDescriptor_t xDesc, const T2* x,
+    const cudnnFilterDescriptor_t wDesc, const T3* w,
     const cudnnConvolutionDescriptor_t convDesc,
     cudnnConvolutionFwdAlgo_t algo,
-    void* workSpace, size_t workSpaceSizeInBytes,
-    const void* beta,
-    const cudnnTensorDescriptor_t yDesc, void* y) {
+    T4* workSpace, size_t workSpaceSizeInBytes,
+    const T1* beta,
+    const cudnnTensorDescriptor_t yDesc, T5* y) {
   CUDA_DEBUG_LOG("cudnnConvolutionForward(handle=" << PtrToStr(handle)
                  << ", algo=" << static_cast<int>(algo)
                  << ", workSpaceSizeInBytes=" << workSpaceSizeInBytes << ")");
@@ -677,19 +685,20 @@ inline cudnnStatus_t cudnnConvolutionForward(
   return result;
 }
 
+template <typename T1, typename T2, typename T3, typename T4, typename T5, typename T6, typename T7>
 inline cudnnStatus_t cudnnConvolutionBiasActivationForward(
     cudnnHandle_t handle,
-    const void* alpha1,
-    const cudnnTensorDescriptor_t xDesc, const void* x,
-    const cudnnFilterDescriptor_t wDesc, const void* w,
+    const T1* alpha1,
+    const cudnnTensorDescriptor_t xDesc, const T2* x,
+    const cudnnFilterDescriptor_t wDesc, const T3* w,
     const cudnnConvolutionDescriptor_t convDesc,
     cudnnConvolutionFwdAlgo_t algo,
-    void* workSpace, size_t workSpaceSizeInBytes,
-    const void* alpha2,
-    const cudnnTensorDescriptor_t zDesc, const void* z,
-    const cudnnTensorDescriptor_t biasDesc, const void* bias,
+    T4* workSpace, size_t workSpaceSizeInBytes,
+    const T1* alpha2,
+    const cudnnTensorDescriptor_t zDesc, const T5* z,
+    const cudnnTensorDescriptor_t biasDesc, const T6* bias,
     const cudnnActivationDescriptor_t activationDesc,
-    const cudnnTensorDescriptor_t yDesc, void* y) {
+    const cudnnTensorDescriptor_t yDesc, T7* y) {
   CUDA_DEBUG_LOG("cudnnConvolutionBiasActivationForward(handle=" << PtrToStr(handle)
                  << ", algo=" << static_cast<int>(algo)
                  << ", workSpaceSizeInBytes=" << workSpaceSizeInBytes << ")");
@@ -702,13 +711,14 @@ inline cudnnStatus_t cudnnConvolutionBiasActivationForward(
   return result;
 }
 
+template <typename T1, typename T2, typename T3>
 inline cudnnStatus_t cudnnActivationForward(
     cudnnHandle_t handle,
     cudnnActivationDescriptor_t activationDesc,
-    const void* alpha,
-    const cudnnTensorDescriptor_t xDesc, const void* x,
-    const void* beta,
-    const cudnnTensorDescriptor_t yDesc, void* y) {
+    const T1* alpha,
+    const cudnnTensorDescriptor_t xDesc, const T2* x,
+    const T1* beta,
+    const cudnnTensorDescriptor_t yDesc, T3* y) {
   CUDA_DEBUG_LOG("cudnnActivationForward(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnActivationForward(handle, activationDesc, alpha,
                                                   xDesc, x, beta, yDesc, y);
@@ -716,12 +726,13 @@ inline cudnnStatus_t cudnnActivationForward(
   return result;
 }
 
+template <typename T1, typename T2, typename T3>
 inline cudnnStatus_t cudnnAddTensor(
     cudnnHandle_t handle,
-    const void* alpha,
-    const cudnnTensorDescriptor_t aDesc, const void* A,
-    const void* beta,
-    const cudnnTensorDescriptor_t cDesc, void* C) {
+    const T1* alpha,
+    const cudnnTensorDescriptor_t aDesc, const T2* A,
+    const T1* beta,
+    const cudnnTensorDescriptor_t cDesc, T3* C) {
   CUDA_DEBUG_LOG("cudnnAddTensor(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnAddTensor(handle, alpha, aDesc, A, beta, cDesc, C);
   CUDA_DEBUG_LOG("cudnnAddTensor -> " << cudnnGetErrorString(result));
