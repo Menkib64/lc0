@@ -47,7 +47,7 @@ namespace cudnn_backend {
 
 // Enable/disable debug logging at compile time
 #ifndef CUDA_WRAPPER_DEBUG
-#define CUDA_WRAPPER_DEBUG 0
+#define CUDA_WRAPPER_DEBUG 1
 #endif
 
 // Helper macro for conditional logging
