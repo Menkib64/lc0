@@ -730,5 +730,24 @@ inline cudnnStatus_t cudnnAddTensor(
 
 #endif  // USE_CUDNN
 
+// Kernel Launch Logging Macros
+// These macros wrap CUDA kernel launches to log execution parameters
+
+#if CUDA_WRAPPER_DEBUG
+// Log kernel launch with grid, block, shared memory, and stream information
+#define CUDA_KERNEL_LAUNCH_LOG(kernel_name, grid_dim, block_dim, shared_mem, stream_ptr) \
+  do { \
+    dim3 _grid = (grid_dim); \
+    dim3 _block = (block_dim); \
+    LOGFILE << "[CUDA_WRAPPER] Kernel launch: " << #kernel_name \
+            << " grid=(" << _grid.x << "," << _grid.y << "," << _grid.z << ")" \
+            << " block=(" << _block.x << "," << _block.y << "," << _block.z << ")" \
+            << " smem=" << (shared_mem) \
+            << " stream=" << PtrToStr(stream_ptr); \
+  } while(0)
+#else
+#define CUDA_KERNEL_LAUNCH_LOG(kernel_name, grid_dim, block_dim, shared_mem, stream_ptr) do {} while(0)
+#endif
+
 }  // namespace cudnn_backend
 }  // namespace lczero
