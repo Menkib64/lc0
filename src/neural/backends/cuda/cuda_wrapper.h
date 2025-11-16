@@ -412,17 +412,18 @@ inline cudaError_t cudaDriverGetVersion_wrapper(int* driverVersion) {
 }
 #define cudaDriverGetVersion cudaDriverGetVersion_wrapper
 
-template <typename T>
+#if 0
 inline cudaError_t cudaFuncSetAttribute_wrapper(const T* func, cudaFuncAttribute attr,
                                          int value) {
   CUDA_DEBUG_LOG("cudaFuncSetAttribute(func=" << PtrToStr(func)
                  << ", attr=" << attr
                  << ", value=" << value << ")");
-  cudaError_t result = ::cudaFuncSetAttribute(reinterpret_cast<const void*>(func), attr, value);
+  cudaError_t result = ::cudaFuncSetAttribute(func, attr, value);
   CUDA_DEBUG_LOG("cudaFuncSetAttribute -> " << cudaGetErrorString(result));
   return result;
 }
 #define cudaFuncSetAttribute cudaFuncSetAttribute_wrapper
+#endif
 
 inline cudaError_t cudaCtxResetPersistingL2Cache_wrapper() {
   CUDA_DEBUG_LOG("cudaCtxResetPersistingL2Cache()");
