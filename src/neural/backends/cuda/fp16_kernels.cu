@@ -142,6 +142,7 @@ bool Se_Fp16_NHWC(int N, int C, int numFc1Out, half* output, const half* skip,
   // TODO: Think of more elegant way to avoid this hardcoding :-/
   if (numFc1Out == 16) {
     if (C == 64) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_64_16, N, C, 0, stream);
       SE_Layer_NHWC<64, 16><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                  w2, b2, bPrev, activation);
     } else {
@@ -150,24 +151,31 @@ bool Se_Fp16_NHWC(int N, int C, int numFc1Out, half* output, const half* skip,
     }
   } else if (numFc1Out == 32) {
     if (C == 64) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_64_32, N, C, 0, stream);
       SE_Layer_NHWC<64, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                  w2, b2, bPrev, activation);
     } else if (C == 128) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_128_32, N, C, 0, stream);
       SE_Layer_NHWC<128, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 192) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_192_32, N, C, 0, stream);
       SE_Layer_NHWC<192, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 256) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_256_32, N, C, 0, stream);
       SE_Layer_NHWC<256, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 320) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_320_32, N, C, 0, stream);
       SE_Layer_NHWC<320, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 352) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_352_32, N, C, 0, stream);
       SE_Layer_NHWC<352, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 384) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_384_32, N, C, 0, stream);
       SE_Layer_NHWC<384, 32><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else {
@@ -176,21 +184,27 @@ bool Se_Fp16_NHWC(int N, int C, int numFc1Out, half* output, const half* skip,
     }
   } else if (numFc1Out == 64) {
     if (C == 64) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_64_64, N, C, 0, stream);
       SE_Layer_NHWC<64, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                  w2, b2, bPrev, activation);
     } else if (C == 128) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_128_64, N, C, 0, stream);
       SE_Layer_NHWC<128, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 192) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_192_64, N, C, 0, stream);
       SE_Layer_NHWC<192, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 256) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_256_64, N, C, 0, stream);
       SE_Layer_NHWC<256, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 320) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_320_64, N, C, 0, stream);
       SE_Layer_NHWC<320, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else if (C == 384) {
+      CUDA_KERNEL_LAUNCH_LOG(SE_Layer_NHWC_384_64, N, C, 0, stream);
       SE_Layer_NHWC<384, 64><<<N, C, 0, stream>>>(output, skip, input, w1, b1,
                                                   w2, b2, bPrev, activation);
     } else {
@@ -443,6 +457,7 @@ void OutputInputTransform(int N, int C, int se_K, T* output, const T* input,
   // Each thread processes entire chess board.
   if (use_se == false) {
     dim3 grid_dim(DivUp(C, kOpInpTransformBlockSize), N, 1);
+    CUDA_KERNEL_LAUNCH_LOG(OutputTransform_relu_InputTransform_kernel, grid_dim, kOpInpTransformBlockSize, 0, stream);
     OutputTransform_relu_InputTransform_kernel<half, activation, use_bias,
                                                use_skip>
         <<<grid_dim, kOpInpTransformBlockSize, 0, stream>>>(N, C, output, input,
@@ -455,6 +470,7 @@ void OutputInputTransform(int N, int C, int se_K, T* output, const T* input,
           OutputInputTransformKernel_fp16_shmem_board<activation, use_bias,
                                                       use_skip>,
           cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * C * sizeof(half));
+      CUDA_KERNEL_LAUNCH_LOG(OutputInputTransformKernel_fp16_shmem_board, N, C, 72 * C * sizeof(half), stream);
       OutputInputTransformKernel_fp16_shmem_board<activation, use_bias,
                                                   use_skip>
           <<<N, C, 72 * C * sizeof(half), stream>>>(
@@ -466,6 +482,7 @@ void OutputInputTransform(int N, int C, int se_K, T* output, const T* input,
           "of filters\n");
     }
   } else {
+    CUDA_KERNEL_LAUNCH_LOG(OutputTransform_SE_relu_InputTransform_kernel, N, C, 0, stream);
     OutputTransform_SE_relu_InputTransform_kernel<half, activation, use_bias,
                                                   use_skip>
         <<<N, C, 0, stream>>>(N, C, se_K, output, input, (half*)skip, bias, w1,
