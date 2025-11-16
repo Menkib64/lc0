@@ -198,7 +198,8 @@ inline cudaError_t cudaGraphInstantiate_wrapper(cudaGraphExec_t* pGraphExec, cud
 }
 #define cudaGraphInstantiate cudaGraphInstantiate_wrapper
 
-inline cudaError_t cudaGraphUpload_wrapper(cudaGraphExec_t graphExec,
+template<typename Exec>
+inline cudaError_t cudaGraphUpload_wrapper(Exec graphExec,
                                         cudaStream_t stream) {
   CUDA_DEBUG_LOG("cudaGraphUpload(graphExec=" << PtrToStr(graphExec)
                  << ", stream=" << PtrToStr(stream) << ")");
@@ -271,9 +272,10 @@ inline cudaError_t cudaStreamEndCapture_wrapper(cudaStream_t stream, cudaGraph_t
 }
 #define cudaStreamEndCapture cudaStreamEndCapture_wrapper
 
+template <typename AttrId, typename AttrValue>
 inline cudaError_t cudaStreamSetAttribute_wrapper(cudaStream_t stream,
-                                           cudaStreamAttrID attr,
-                                           const cudaStreamAttrValue* value) {
+                                           AttrId attr,
+                                           const AttrValue* value) {
   CUDA_DEBUG_LOG("cudaStreamSetAttribute(stream=" << PtrToStr(stream)
                  << ", attr=" << attr << ")");
   cudaError_t result = ::cudaStreamSetAttribute(stream, attr, value);
@@ -321,7 +323,8 @@ inline cudaError_t cudaEventRecord_wrapper(cudaEvent_t event, cudaStream_t strea
 }
 #define cudaEventRecord cudaEventRecord_wrapper
 
-inline cudaError_t cudaEventRecordWithFlags_wrapper(cudaEvent_t event, 
+template <typename Event>
+inline cudaError_t cudaEventRecordWithFlags_wrapper(Event event, 
                                              cudaStream_t stream,
                                              unsigned int flags) {
   CUDA_DEBUG_LOG("cudaEventRecordWithFlags(event=" << PtrToStr(event)
@@ -425,6 +428,7 @@ inline cudaError_t cudaFuncSetAttribute_wrapper(const T* func, cudaFuncAttribute
 #define cudaFuncSetAttribute cudaFuncSetAttribute_wrapper
 #endif
 
+template <typename T = void>
 inline cudaError_t cudaCtxResetPersistingL2Cache_wrapper() {
   CUDA_DEBUG_LOG("cudaCtxResetPersistingL2Cache()");
   cudaError_t result = ::cudaCtxResetPersistingL2Cache();
@@ -581,7 +585,7 @@ inline cublasStatus_t cublasSgemmStridedBatched_wrapper(cublasHandle_t handle,
 }
 #define cublasSgemmStridedBatched cublasSgemmStridedBatched_wrapper
 
-template <typename T1, typename T2, typename T3, typename T4>
+template <typename T1, typename T2, typename T3, typename T4, typename ComputeType>
 inline cublasStatus_t cublasGemmStridedBatchedEx_wrapper(cublasHandle_t handle,
                                                   cublasOperation_t transa,
                                                   cublasOperation_t transb,
@@ -595,7 +599,7 @@ inline cublasStatus_t cublasGemmStridedBatchedEx_wrapper(cublasHandle_t handle,
                                                   T4* C, cudaDataType Ctype,
                                                   int ldc, long long int strideC,
                                                   int batchCount,
-                                                  cublasComputeType_t computeType,
+                                                  ComputeType computeType,
                                                   cublasGemmAlgo_t algo) {
   CUDA_DEBUG_LOG("cublasGemmStridedBatchedEx(handle=" << PtrToStr(handle)
                  << ", m=" << m << ", n=" << n << ", k=" << k
