@@ -38,6 +38,9 @@
 typedef void* cudnnHandle_t;
 #endif
 
+// Include CUDA wrapper functions for debug logging
+#include "cuda_wrapper.h"
+
 #if CUBLAS_VER_MAJOR < 11
 #define CUBLAS_PEDANTIC_MATH CUBLAS_DEFAULT_MATH
 #endif
