@@ -1794,6 +1794,7 @@ void EncoderBlock<DataType>::Eval(int N, DataType* in_out_tensor,
           cudaMemcpy(*offset_pointers, offsets.data(),
                      encoder_heads_ * max_batch_size_ * 5 * sizeof(DataType*),
                      cudaMemcpyHostToDevice));
+      ReportCUDAErrors(cudaDeviceSynchronize());
     }
     cublasXGemmBatched<DataType>(
         cublas, CUBLAS_OP_T, CUBLAS_OP_N, 64 /*M*/, 64 /*N*/,
