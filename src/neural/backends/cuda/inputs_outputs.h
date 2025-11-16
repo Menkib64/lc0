@@ -31,6 +31,7 @@
 #include <memory>
 
 #include "cuda_common.h"
+#include "cuda_wrapper.h"
 #include "neural/network.h"
 
 namespace lczero {

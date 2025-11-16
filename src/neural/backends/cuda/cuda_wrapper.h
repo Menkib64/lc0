@@ -77,11 +77,30 @@ inline cudaError_t cudaMalloc(T** devPtr, S size) {
   return result;
 }
 
+template <typename T, typename S, typename F>
+inline cudaError_t cudaHostAlloc(T** ptr, S size, F flags) {
+  CUDA_DEBUG_LOG("cudaHostAlloc(ptr=" << PtrToStr(ptr) 
+                 << ", size=" << size 
+                 << ", flags=" << flags << ")");
+  cudaError_t result = ::cudaHostAlloc(reinterpret_cast<void**>(ptr), size, flags);
+  CUDA_DEBUG_LOG("cudaHostAlloc -> " << cudaGetErrorString(result) 
+                 << ", *ptr=" << PtrToStr(*ptr));
+  return result;
+}
+
 template <typename T>
 inline cudaError_t cudaFree(T* devPtr) {
   CUDA_DEBUG_LOG("cudaFree(devPtr=" << PtrToStr(devPtr) << ")");
   cudaError_t result = ::cudaFree(devPtr);
   CUDA_DEBUG_LOG("cudaFree -> " << cudaGetErrorString(result));
+  return result;
+}
+
+template <typename T>
+inline cudaError_t cudaFreeHost(T* ptr) {
+  CUDA_DEBUG_LOG("cudaFreeHost(ptr=" << PtrToStr(ptr) << ")");
+  cudaError_t result = ::cudaFreeHost(ptr);
+  CUDA_DEBUG_LOG("cudaFreeHost -> " << cudaGetErrorString(result));
   return result;
 }
 
@@ -102,8 +121,7 @@ inline cudaError_t cudaMemcpy(T1* dst, const T2* src, size_t count,
   return result;
 }
 
-template <typename T1, typename T2>
-inline cudaError_t cudaMemcpyAsync(T1* dst, const T2* src, size_t count,
+inline cudaError_t cudaMemcpyAsync_wrapper(void* dst, const void* src, size_t count,
                                    cudaMemcpyKind kind, cudaStream_t stream) {
   [[maybe_unused]] const char* kind_str = 
       (kind == cudaMemcpyHostToDevice) ? "HostToDevice" :
@@ -119,9 +137,9 @@ inline cudaError_t cudaMemcpyAsync(T1* dst, const T2* src, size_t count,
   CUDA_DEBUG_LOG("cudaMemcpyAsync -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaMemcpyAsync cudaMemcpyAsync_wrapper
 
-template <typename T>
-inline cudaError_t cudaMemset(T* devPtr, int value, size_t count) {
+inline cudaError_t cudaMemset_wrapper(void* devPtr, int value, size_t count) {
   CUDA_DEBUG_LOG("cudaMemset(devPtr=" << PtrToStr(devPtr)
                  << ", value=" << value
                  << ", count=" << count << ")");
@@ -129,8 +147,85 @@ inline cudaError_t cudaMemset(T* devPtr, int value, size_t count) {
   CUDA_DEBUG_LOG("cudaMemset -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaMemset cudaMemset_wrapper
 
-template <typename Stream> inline cudaError_t cudaStreamCreateWithFlags(Stream* pStream, 
+inline cudaError_t cudaMemsetAsync_wrapper(void* devPtr, int value, size_t count,
+                                  cudaStream_t stream) {
+  CUDA_DEBUG_LOG("cudaMemsetAsync(devPtr=" << PtrToStr(devPtr)
+                 << ", value=" << value
+                 << ", count=" << count
+                 << ", stream=" << PtrToStr(stream) << ")");
+  cudaError_t result = ::cudaMemsetAsync(devPtr, value, count, stream);
+  CUDA_DEBUG_LOG("cudaMemsetAsync -> " << cudaGetErrorString(result));
+  return result;
+}
+
+#define cudaMemsetAsync cudaMemsetAsync_wrapper
+
+inline cudaError_t cudaGraphExecDestroy_wrapper(cudaGraphExec_t graphExec) {
+  CUDA_DEBUG_LOG("cudaGraphExecDestroy(graphExec=" << PtrToStr(graphExec) << ")");
+  cudaError_t result = ::cudaGraphExecDestroy(graphExec);
+  CUDA_DEBUG_LOG("cudaGraphExecDestroy -> " << cudaGetErrorString(result));
+  return result;
+}
+
+#define cudaGraphExecDestroy cudaGraphExecDestroy_wrapper
+
+inline cudaError_t cudaGraphLaunch_wrapper(cudaGraphExec_t graphExec, 
+                                            cudaStream_t stream) {
+  CUDA_DEBUG_LOG("cudaGraphLaunch(graphExec=" << PtrToStr(graphExec)
+                 << ", stream=" << PtrToStr(stream) << ")");
+  cudaError_t result = ::cudaGraphLaunch(graphExec, stream);
+  CUDA_DEBUG_LOG("cudaGraphLaunch -> " << cudaGetErrorString(result));
+  return result;
+}
+#define cudaGraphLaunch cudaGraphLaunch_wrapper
+
+inline cudaError_t cudaGraphInstantiate_wrapper(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
+                                         cudaGraphNode_t* pErrorNode,
+                                         char* pLogBuffer,
+                                         size_t bufferSize) {
+  CUDA_DEBUG_LOG("cudaGraphInstantiate(pGraphExec=" << PtrToStr(pGraphExec)
+                 << ", graph=" << PtrToStr(graph)
+                 << ", pErrorNode=" << PtrToStr(pErrorNode)
+                 << ", pLogBuffer=" << PtrToStr(pLogBuffer)
+                 << ", bufferSize=" << bufferSize << ")");
+  cudaError_t result = ::cudaGraphInstantiate(pGraphExec, graph, pErrorNode,
+                                             pLogBuffer, bufferSize);
+  CUDA_DEBUG_LOG("cudaGraphInstantiate -> " << cudaGetErrorString(result)
+                 << ", *pGraphExec=" << PtrToStr(*pGraphExec));
+  return result;
+}
+#define cudaGraphInstantiate cudaGraphInstantiate_wrapper
+
+inline cudaError_t cudaGraphUpload_wrapper(cudaGraphExec_t graphExec,
+                                        cudaStream_t stream) {
+  CUDA_DEBUG_LOG("cudaGraphUpload(graphExec=" << PtrToStr(graphExec)
+                 << ", stream=" << PtrToStr(stream) << ")");
+  cudaError_t result = ::cudaGraphUpload(graphExec, stream);
+  CUDA_DEBUG_LOG("cudaGraphUpload -> " << cudaGetErrorString(result));
+  return result;
+}
+#define cudaGraphUpload cudaGraphUpload_wrapper
+
+inline cudaError_t cudaGraphDestroy_wrapper(cudaGraph_t graph) {
+  CUDA_DEBUG_LOG("cudaGraphDestroy(graph=" << PtrToStr(graph) << ")");
+  cudaError_t result = ::cudaGraphDestroy(graph);
+  CUDA_DEBUG_LOG("cudaGraphDestroy -> " << cudaGetErrorString(result));
+  return result;
+}
+#define cudaGraphDestroy cudaGraphDestroy_wrapper
+
+inline cudaError_t cudaStreamCreate_wrapper(cudaStream_t* pStream) {
+  CUDA_DEBUG_LOG("cudaStreamCreate(pStream=" << PtrToStr(pStream) << ")");
+  cudaError_t result = ::cudaStreamCreate(pStream);
+  CUDA_DEBUG_LOG("cudaStreamCreate -> " << cudaGetErrorString(result)
+                 << ", *pStream=" << PtrToStr(*pStream));
+  return result;
+}
+#define cudaStreamCreate cudaStreamCreate_wrapper
+
+inline cudaError_t cudaStreamCreateWithFlags_wrapper(cudaStream_t* pStream, 
                                               unsigned int flags) {
   CUDA_DEBUG_LOG("cudaStreamCreateWithFlags(pStream=" << PtrToStr(pStream)
                  << ", flags=" << flags << ")");
@@ -139,22 +234,44 @@ template <typename Stream> inline cudaError_t cudaStreamCreateWithFlags(Stream* 
                  << ", *pStream=" << PtrToStr(*pStream));
   return result;
 }
+#define cudaStreamCreateWithFlags cudaStreamCreateWithFlags_wrapper
 
-template <typename Stream> inline cudaError_t cudaStreamDestroy(Stream stream) {
+inline cudaError_t cudaStreamDestroy_wrapper(cudaStream_t stream) {
   CUDA_DEBUG_LOG("cudaStreamDestroy(stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaStreamDestroy(stream);
   CUDA_DEBUG_LOG("cudaStreamDestroy -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaStreamDestroy cudaStreamDestroy_wrapper
 
-template <typename Stream> inline cudaError_t cudaStreamSynchronize(Stream stream) {
+inline cudaError_t cudaStreamSynchronize_wrapper(cudaStream_t stream) {
   CUDA_DEBUG_LOG("cudaStreamSynchronize(stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaStreamSynchronize(stream);
   CUDA_DEBUG_LOG("cudaStreamSynchronize -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaStreamSynchronize cudaStreamSynchronize_wrapper
 
-template <typename Stream> inline cudaError_t cudaStreamSetAttribute(Stream stream,
+inline cudaError_t cudaStreamBeginCapture_wrapper(cudaStream_t stream, cudaStreamCaptureMode mode) {
+  CUDA_DEBUG_LOG("cudaStreamBeginCapture(stream=" << PtrToStr(stream)
+                 << ", mode=" << mode << ")");
+  cudaError_t result = ::cudaStreamBeginCapture(stream, mode);
+  CUDA_DEBUG_LOG("cudaStreamBeginCapture -> " << cudaGetErrorString(result));
+  return result;
+}
+#define cudaStreamBeginCapture cudaStreamBeginCapture_wrapper
+
+inline cudaError_t cudaStreamEndCapture_wrapper(cudaStream_t stream, cudaGraph_t* pGraph) {
+  CUDA_DEBUG_LOG("cudaStreamEndCapture(stream=" << PtrToStr(stream)
+                 << ", pGraph=" << PtrToStr(pGraph) << ")");
+  cudaError_t result = ::cudaStreamEndCapture(stream, pGraph);
+  CUDA_DEBUG_LOG("cudaStreamEndCapture -> " << cudaGetErrorString(result)
+                 << ", *pGraph=" << PtrToStr(*pGraph));
+  return result;
+}
+#define cudaStreamEndCapture cudaStreamEndCapture_wrapper
+
+inline cudaError_t cudaStreamSetAttribute_wrapper(cudaStream_t stream,
                                            cudaStreamAttrID attr,
                                            const cudaStreamAttrValue* value) {
   CUDA_DEBUG_LOG("cudaStreamSetAttribute(stream=" << PtrToStr(stream)
@@ -163,8 +280,9 @@ template <typename Stream> inline cudaError_t cudaStreamSetAttribute(Stream stre
   CUDA_DEBUG_LOG("cudaStreamSetAttribute -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaStreamSetAttribute cudaStreamSetAttribute_wrapper
 
-template <typename Stream> inline cudaError_t cudaStreamWaitEvent(Stream stream, cudaEvent_t event,
+inline cudaError_t cudaStreamWaitEvent_wrapper(cudaStream_t stream, cudaEvent_t event,
                                         unsigned int flags) {
   CUDA_DEBUG_LOG("cudaStreamWaitEvent(stream=" << PtrToStr(stream)
                  << ", event=" << PtrToStr(event)
@@ -173,8 +291,9 @@ template <typename Stream> inline cudaError_t cudaStreamWaitEvent(Stream stream,
   CUDA_DEBUG_LOG("cudaStreamWaitEvent -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaStreamWaitEvent cudaStreamWaitEvent_wrapper
 
-template <typename Event> inline cudaError_t cudaEventCreateWithFlags(Event* event, 
+inline cudaError_t cudaEventCreateWithFlags_wrapper(cudaEvent_t* event, 
                                              unsigned int flags) {
   CUDA_DEBUG_LOG("cudaEventCreateWithFlags(event=" << PtrToStr(event)
                  << ", flags=" << flags << ")");
@@ -183,23 +302,26 @@ template <typename Event> inline cudaError_t cudaEventCreateWithFlags(Event* eve
                  << ", *event=" << PtrToStr(*event));
   return result;
 }
+#define cudaEventCreateWithFlags cudaEventCreateWithFlags_wrapper
 
-template <typename Event> inline cudaError_t cudaEventDestroy(Event event) {
+inline cudaError_t cudaEventDestroy_wrapper(cudaEvent_t event) {
   CUDA_DEBUG_LOG("cudaEventDestroy(event=" << PtrToStr(event) << ")");
   cudaError_t result = ::cudaEventDestroy(event);
   CUDA_DEBUG_LOG("cudaEventDestroy -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaEventDestroy cudaEventDestroy_wrapper
 
-template <typename Stream> inline cudaError_t cudaEventRecord(cudaEvent_t event, Stream stream) {
+inline cudaError_t cudaEventRecord_wrapper(cudaEvent_t event, cudaStream_t stream) {
   CUDA_DEBUG_LOG("cudaEventRecord(event=" << PtrToStr(event)
                  << ", stream=" << PtrToStr(stream) << ")");
   cudaError_t result = ::cudaEventRecord(event, stream);
   CUDA_DEBUG_LOG("cudaEventRecord -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaEventRecord cudaEventRecord_wrapper
 
-template <typename Event> inline cudaError_t cudaEventRecordWithFlags(Event event, 
+inline cudaError_t cudaEventRecordWithFlags_wrapper(cudaEvent_t event, 
                                              cudaStream_t stream,
                                              unsigned int flags) {
   CUDA_DEBUG_LOG("cudaEventRecordWithFlags(event=" << PtrToStr(event)
@@ -209,30 +331,34 @@ template <typename Event> inline cudaError_t cudaEventRecordWithFlags(Event even
   CUDA_DEBUG_LOG("cudaEventRecordWithFlags -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaEventRecordWithFlags cudaEventRecordWithFlags_wrapper
 
-template <typename Event> inline cudaError_t cudaEventSynchronize(Event event) {
+inline cudaError_t cudaEventSynchronize_wrapper(cudaEvent_t event) {
   CUDA_DEBUG_LOG("cudaEventSynchronize(event=" << PtrToStr(event) << ")");
   cudaError_t result = ::cudaEventSynchronize(event);
   CUDA_DEBUG_LOG("cudaEventSynchronize -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaEventSynchronize cudaEventSynchronize_wrapper
 
-inline cudaError_t cudaGetDeviceCount(int* count) {
+inline cudaError_t cudaGetDeviceCount_wrapper(int* count) {
   CUDA_DEBUG_LOG("cudaGetDeviceCount(count=" << PtrToStr(count) << ")");
   cudaError_t result = ::cudaGetDeviceCount(count);
   CUDA_DEBUG_LOG("cudaGetDeviceCount -> " << cudaGetErrorString(result)
                  << ", *count=" << *count);
   return result;
 }
+#define cudaGetDeviceCount cudaGetDeviceCount_wrapper
 
-template <typename Int> inline cudaError_t cudaSetDevice(Int device) {
+inline cudaError_t cudaSetDevice_wrapper(int device) {
   CUDA_DEBUG_LOG("cudaSetDevice(device=" << device << ")");
   cudaError_t result = ::cudaSetDevice(device);
   CUDA_DEBUG_LOG("cudaSetDevice -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaSetDevice cudaSetDevice_wrapper
 
-template <typename Int> inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, Int device) {
+inline cudaError_t cudaGetDeviceProperties_wrapper(cudaDeviceProp* prop, int device) {
   CUDA_DEBUG_LOG("cudaGetDeviceProperties(prop=" << PtrToStr(prop)
                  << ", device=" << device << ")");
   cudaError_t result = ::cudaGetDeviceProperties(prop, device);
@@ -240,9 +366,22 @@ template <typename Int> inline cudaError_t cudaGetDeviceProperties(cudaDevicePro
                  << ", name=" << (result == cudaSuccess ? prop->name : "N/A"));
   return result;
 }
+#undef cudaGetDeviceProperties
+#define cudaGetDeviceProperties cudaGetDeviceProperties_wrapper
 
-template <typename Int> inline cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr,
-                                           Int device) {
+inline cudaError_t cudaMemGetInfo_wrapper(size_t* free, size_t* total) {
+  CUDA_DEBUG_LOG("cudaMemGetInfo(free=" << PtrToStr(free)
+                 << ", total=" << PtrToStr(total) << ")");
+  cudaError_t result = ::cudaMemGetInfo(free, total);
+  CUDA_DEBUG_LOG("cudaMemGetInfo -> " << cudaGetErrorString(result)
+                 << ", *free=" << *free
+                 << ", *total=" << *total);
+  return result;
+}
+#define cudaMemGetInfo cudaMemGetInfo_wrapper
+
+inline cudaError_t cudaDeviceGetAttribute_wrapper(int* value, cudaDeviceAttr attr,
+                                           int device) {
   CUDA_DEBUG_LOG("cudaDeviceGetAttribute(value=" << PtrToStr(value)
                  << ", attr=" << attr
                  << ", device=" << device << ")");
@@ -251,8 +390,9 @@ template <typename Int> inline cudaError_t cudaDeviceGetAttribute(int* value, cu
                  << ", *value=" << *value);
   return result;
 }
+#define cudaDeviceGetAttribute cudaDeviceGetAttribute_wrapper
 
-inline cudaError_t cudaRuntimeGetVersion(int* runtimeVersion) {
+inline cudaError_t cudaRuntimeGetVersion_wrapper(int* runtimeVersion) {
   CUDA_DEBUG_LOG("cudaRuntimeGetVersion(runtimeVersion=" 
                  << PtrToStr(runtimeVersion) << ")");
   cudaError_t result = ::cudaRuntimeGetVersion(runtimeVersion);
@@ -260,8 +400,9 @@ inline cudaError_t cudaRuntimeGetVersion(int* runtimeVersion) {
                  << ", *runtimeVersion=" << *runtimeVersion);
   return result;
 }
+#define cudaRuntimeGetVersion cudaRuntimeGetVersion_wrapper
 
-inline cudaError_t cudaDriverGetVersion(int* driverVersion) {
+inline cudaError_t cudaDriverGetVersion_wrapper(int* driverVersion) {
   CUDA_DEBUG_LOG("cudaDriverGetVersion(driverVersion=" 
                  << PtrToStr(driverVersion) << ")");
   cudaError_t result = ::cudaDriverGetVersion(driverVersion);
@@ -269,9 +410,10 @@ inline cudaError_t cudaDriverGetVersion(int* driverVersion) {
                  << ", *driverVersion=" << *driverVersion);
   return result;
 }
+#define cudaDriverGetVersion cudaDriverGetVersion_wrapper
 
 template <typename T>
-inline cudaError_t cudaFuncSetAttribute(const T* func, cudaFuncAttribute attr,
+inline cudaError_t cudaFuncSetAttribute_wrapper(const T* func, cudaFuncAttribute attr,
                                          int value) {
   CUDA_DEBUG_LOG("cudaFuncSetAttribute(func=" << PtrToStr(func)
                  << ", attr=" << attr
@@ -280,32 +422,38 @@ inline cudaError_t cudaFuncSetAttribute(const T* func, cudaFuncAttribute attr,
   CUDA_DEBUG_LOG("cudaFuncSetAttribute -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaFuncSetAttribute cudaFuncSetAttribute_wrapper
 
-inline cudaError_t cudaCtxResetPersistingL2Cache() {
+inline cudaError_t cudaCtxResetPersistingL2Cache_wrapper() {
   CUDA_DEBUG_LOG("cudaCtxResetPersistingL2Cache()");
   cudaError_t result = ::cudaCtxResetPersistingL2Cache();
   CUDA_DEBUG_LOG("cudaCtxResetPersistingL2Cache -> " << cudaGetErrorString(result));
   return result;
 }
+#define cudaCtxResetPersistingL2Cache cudaCtxResetPersistingL2Cache_wrapper
 
 // cuBLAS API Wrappers
 
-template <typename Handle> inline cublasStatus_t cublasCreate(Handle* handle) {
+inline cublasStatus_t cublasCreate_wrapper(cublasHandle_t* handle) {
   CUDA_DEBUG_LOG("cublasCreate(handle=" << PtrToStr(handle) << ")");
   cublasStatus_t result = ::cublasCreate(handle);
   CUDA_DEBUG_LOG("cublasCreate -> " << static_cast<int>(result)
                  << ", *handle=" << PtrToStr(*handle));
   return result;
 }
+#undef cublasCreate
+#define cublasCreate cublasCreate_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasDestroy(Handle handle) {
+inline cublasStatus_t cublasDestroy_wrapper(cublasHandle_t handle) {
   CUDA_DEBUG_LOG("cublasDestroy(handle=" << PtrToStr(handle) << ")");
   cublasStatus_t result = ::cublasDestroy(handle);
   CUDA_DEBUG_LOG("cublasDestroy -> " << static_cast<int>(result));
   return result;
 }
+#undef cublasDestroy
+#define cublasDestroy cublasDestroy_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasSetStream(Handle handle, 
+inline cublasStatus_t cublasSetStream_wrapper(cublasHandle_t handle, 
                                        cudaStream_t streamId) {
   CUDA_DEBUG_LOG("cublasSetStream(handle=" << PtrToStr(handle)
                  << ", streamId=" << PtrToStr(streamId) << ")");
@@ -313,8 +461,10 @@ template <typename Handle> inline cublasStatus_t cublasSetStream(Handle handle,
   CUDA_DEBUG_LOG("cublasSetStream -> " << static_cast<int>(result));
   return result;
 }
+#undef cublasSetStream
+#define cublasSetStream cublasSetStream_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasSetMathMode(Handle handle, 
+inline cublasStatus_t cublasSetMathMode_wrapper(cublasHandle_t handle, 
                                          cublasMath_t mode) {
   CUDA_DEBUG_LOG("cublasSetMathMode(handle=" << PtrToStr(handle)
                  << ", mode=" << static_cast<int>(mode) << ")");
@@ -322,8 +472,9 @@ template <typename Handle> inline cublasStatus_t cublasSetMathMode(Handle handle
   CUDA_DEBUG_LOG("cublasSetMathMode -> " << static_cast<int>(result));
   return result;
 }
+#define cublasSetMathMode cublasSetMathMode_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasSgemm(Handle handle, cublasOperation_t transa,
+inline cublasStatus_t cublasSgemm_wrapper(cublasHandle_t handle, cublasOperation_t transa,
                                    cublasOperation_t transb, int m, int n, int k,
                                    const float* alpha, const float* A, int lda,
                                    const float* B, int ldb, const float* beta,
@@ -340,8 +491,10 @@ template <typename Handle> inline cublasStatus_t cublasSgemm(Handle handle, cubl
   CUDA_DEBUG_LOG("cublasSgemm -> " << static_cast<int>(result));
   return result;
 }
+#undef cublasSgemm
+#define cublasSgemm cublasSgemm_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasHgemm(Handle handle, cublasOperation_t transa,
+inline cublasStatus_t cublasHgemm_wrapper(cublasHandle_t handle, cublasOperation_t transa,
                                    cublasOperation_t transb, int m, int n, int k,
                                    const __half* alpha, const __half* A, int lda,
                                    const __half* B, int ldb, const __half* beta,
@@ -357,8 +510,9 @@ template <typename Handle> inline cublasStatus_t cublasHgemm(Handle handle, cubl
   CUDA_DEBUG_LOG("cublasHgemm -> " << static_cast<int>(result));
   return result;
 }
+#define cublasHgemm cublasHgemm_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasSgemmBatched(Handle handle,
+inline cublasStatus_t cublasSgemmBatched_wrapper(cublasHandle_t handle,
                                           cublasOperation_t transa,
                                           cublasOperation_t transb,
                                           int m, int n, int k,
@@ -377,8 +531,9 @@ template <typename Handle> inline cublasStatus_t cublasSgemmBatched(Handle handl
   CUDA_DEBUG_LOG("cublasSgemmBatched -> " << static_cast<int>(result));
   return result;
 }
+#define cublasSgemmBatched cublasSgemmBatched_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasHgemmBatched(Handle handle,
+inline cublasStatus_t cublasHgemmBatched_wrapper(cublasHandle_t handle,
                                           cublasOperation_t transa,
                                           cublasOperation_t transb,
                                           int m, int n, int k,
@@ -397,8 +552,9 @@ template <typename Handle> inline cublasStatus_t cublasHgemmBatched(Handle handl
   CUDA_DEBUG_LOG("cublasHgemmBatched -> " << static_cast<int>(result));
   return result;
 }
+#define cublasHgemmBatched cublasHgemmBatched_wrapper
 
-template <typename Handle> inline cublasStatus_t cublasSgemmStridedBatched(Handle handle,
+inline cublasStatus_t cublasSgemmStridedBatched_wrapper(cublasHandle_t handle,
                                                  cublasOperation_t transa,
                                                  cublasOperation_t transb,
                                                  int m, int n, int k,
@@ -422,9 +578,10 @@ template <typename Handle> inline cublasStatus_t cublasSgemmStridedBatched(Handl
   CUDA_DEBUG_LOG("cublasSgemmStridedBatched -> " << static_cast<int>(result));
   return result;
 }
+#define cublasSgemmStridedBatched cublasSgemmStridedBatched_wrapper
 
 template <typename T1, typename T2, typename T3, typename T4>
-inline cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
+inline cublasStatus_t cublasGemmStridedBatchedEx_wrapper(cublasHandle_t handle,
                                                   cublasOperation_t transa,
                                                   cublasOperation_t transb,
                                                   int m, int n, int k,
@@ -452,41 +609,46 @@ inline cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
   CUDA_DEBUG_LOG("cublasGemmStridedBatchedEx -> " << static_cast<int>(result));
   return result;
 }
+#define cublasGemmStridedBatchedEx cublasGemmStridedBatchedEx_wrapper
 
 // cuDNN API Wrappers
 
 #ifdef USE_CUDNN
 
-template <typename Handle> inline cudnnStatus_t cudnnCreate(Handle* handle) {
+inline cudnnStatus_t cudnnCreate_wrapper(cudnnHandle_t* handle) {
   CUDA_DEBUG_LOG("cudnnCreate(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnCreate(handle);
   CUDA_DEBUG_LOG("cudnnCreate -> " << cudnnGetErrorString(result)
                  << ", *handle=" << PtrToStr(*handle));
   return result;
 }
+#define cudnnCreate cudnnCreate_wrapper
 
-template <typename Handle> inline cudnnStatus_t cudnnDestroy(Handle handle) {
+inline cudnnStatus_t cudnnDestroy_wrapper(cudnnHandle_t handle) {
   CUDA_DEBUG_LOG("cudnnDestroy(handle=" << PtrToStr(handle) << ")");
   cudnnStatus_t result = ::cudnnDestroy(handle);
   CUDA_DEBUG_LOG("cudnnDestroy -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnDestroy cudnnDestroy_wrapper
 
-template <typename Stream> inline cudnnStatus_t cudnnSetStream(cudnnHandle_t handle, Stream streamId) {
+inline cudnnStatus_t cudnnSetStream_wrapper(cudnnHandle_t handle, cudaStream_t streamId) {
   CUDA_DEBUG_LOG("cudnnSetStream(handle=" << PtrToStr(handle)
                  << ", streamId=" << PtrToStr(streamId) << ")");
   cudnnStatus_t result = ::cudnnSetStream(handle, streamId);
   CUDA_DEBUG_LOG("cudnnSetStream -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetStream cudnnSetStream_wrapper
 
-inline size_t cudnnGetVersion() {
+inline size_t cudnnGetVersion_wrapper() {
   size_t version = ::cudnnGetVersion();
   CUDA_DEBUG_LOG("cudnnGetVersion() -> " << version);
   return version;
 }
+#define cudnnGetVersion cudnnGetVersion_wrapper
 
-template <typename Tensor> inline cudnnStatus_t cudnnCreateTensorDescriptor(Tensor* tensorDesc) {
+inline cudnnStatus_t cudnnCreateTensorDescriptor_wrapper(cudnnTensorDescriptor_t* tensorDesc) {
   CUDA_DEBUG_LOG("cudnnCreateTensorDescriptor(tensorDesc=" 
                  << PtrToStr(tensorDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateTensorDescriptor(tensorDesc);
@@ -494,16 +656,18 @@ template <typename Tensor> inline cudnnStatus_t cudnnCreateTensorDescriptor(Tens
                  << ", *tensorDesc=" << PtrToStr(*tensorDesc));
   return result;
 }
+#define cudnnCreateTensorDescriptor cudnnCreateTensorDescriptor_wrapper
 
-template <typename Tensor> inline cudnnStatus_t cudnnDestroyTensorDescriptor(Tensor tensorDesc) {
+inline cudnnStatus_t cudnnDestroyTensorDescriptor_wrapper(cudnnTensorDescriptor_t tensorDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyTensorDescriptor(tensorDesc=" 
                  << PtrToStr(tensorDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyTensorDescriptor(tensorDesc);
   CUDA_DEBUG_LOG("cudnnDestroyTensorDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnDestroyTensorDescriptor cudnnDestroyTensorDescriptor_wrapper
 
-template <typename Tensor> inline cudnnStatus_t cudnnSetTensor4dDescriptor(Tensor tensorDesc,
+inline cudnnStatus_t cudnnSetTensor4dDescriptor_wrapper(cudnnTensorDescriptor_t tensorDesc,
                                                   cudnnTensorFormat_t format,
                                                   cudnnDataType_t dataType,
                                                   int n, int c, int h, int w) {
@@ -517,8 +681,9 @@ template <typename Tensor> inline cudnnStatus_t cudnnSetTensor4dDescriptor(Tenso
   CUDA_DEBUG_LOG("cudnnSetTensor4dDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetTensor4dDescriptor cudnnSetTensor4dDescriptor_wrapper
 
-template <typename Filter> inline cudnnStatus_t cudnnCreateFilterDescriptor(Filter* filterDesc) {
+inline cudnnStatus_t cudnnCreateFilterDescriptor_wrapper(cudnnFilterDescriptor_t* filterDesc) {
   CUDA_DEBUG_LOG("cudnnCreateFilterDescriptor(filterDesc=" 
                  << PtrToStr(filterDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateFilterDescriptor(filterDesc);
@@ -526,16 +691,18 @@ template <typename Filter> inline cudnnStatus_t cudnnCreateFilterDescriptor(Filt
                  << ", *filterDesc=" << PtrToStr(*filterDesc));
   return result;
 }
+#define cudnnCreateFilterDescriptor cudnnCreateFilterDescriptor_wrapper
 
-template <typename Filter> inline cudnnStatus_t cudnnDestroyFilterDescriptor(Filter filterDesc) {
+inline cudnnStatus_t cudnnDestroyFilterDescriptor_wrapper(cudnnFilterDescriptor_t filterDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyFilterDescriptor(filterDesc=" 
                  << PtrToStr(filterDesc) << ")");
   cudnnStatus_t result = ::cudnnDestroyFilterDescriptor(filterDesc);
   CUDA_DEBUG_LOG("cudnnDestroyFilterDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnDestroyFilterDescriptor cudnnDestroyFilterDescriptor_wrapper
 
-template <typename Filter> inline cudnnStatus_t cudnnSetFilter4dDescriptor(Filter filterDesc,
+inline cudnnStatus_t cudnnSetFilter4dDescriptor_wrapper(cudnnFilterDescriptor_t filterDesc,
                                                   cudnnDataType_t dataType,
                                                   cudnnTensorFormat_t format,
                                                   int k, int c, int h, int w) {
@@ -549,9 +716,10 @@ template <typename Filter> inline cudnnStatus_t cudnnSetFilter4dDescriptor(Filte
   CUDA_DEBUG_LOG("cudnnSetFilter4dDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetFilter4dDescriptor cudnnSetFilter4dDescriptor_wrapper
 
-template <typename Convolution> inline cudnnStatus_t cudnnCreateConvolutionDescriptor(
-    Convolution* convDesc) {
+inline cudnnStatus_t cudnnCreateConvolutionDescriptor_wrapper(
+    cudnnConvolutionDescriptor_t* convDesc) {
   CUDA_DEBUG_LOG("cudnnCreateConvolutionDescriptor(convDesc=" 
                  << PtrToStr(convDesc) << ")");
   cudnnStatus_t result = ::cudnnCreateConvolutionDescriptor(convDesc);
@@ -559,8 +727,9 @@ template <typename Convolution> inline cudnnStatus_t cudnnCreateConvolutionDescr
                  << ", *convDesc=" << PtrToStr(*convDesc));
   return result;
 }
+#define cudnnCreateConvolutionDescriptor cudnnCreateConvolutionDescriptor_wrapper
 
-template <typename Convolution> inline cudnnStatus_t cudnnDestroyConvolutionDescriptor(
+template <typename Convolution> inline cudnnStatus_t cudnnDestroyConvolutionDescriptor_wrapper(
     Convolution convDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyConvolutionDescriptor(convDesc=" 
                  << PtrToStr(convDesc) << ")");
@@ -569,8 +738,9 @@ template <typename Convolution> inline cudnnStatus_t cudnnDestroyConvolutionDesc
                  << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnDestroyConvolutionDescriptor cudnnDestroyConvolutionDescriptor_wrapper
 
-template <typename Convolution> inline cudnnStatus_t cudnnSetConvolution2dDescriptor(
+template <typename Convolution> inline cudnnStatus_t cudnnSetConvolution2dDescriptor_wrapper(
     Convolution convDesc,
     int pad_h, int pad_w, int u, int v, int dilation_h, int dilation_w,
     cudnnConvolutionMode_t mode, cudnnDataType_t computeType) {
@@ -587,8 +757,9 @@ template <typename Convolution> inline cudnnStatus_t cudnnSetConvolution2dDescri
   CUDA_DEBUG_LOG("cudnnSetConvolution2dDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetConvolution2dDescriptor cudnnSetConvolution2dDescriptor_wrapper
 
-template <typename Convolution> inline cudnnStatus_t cudnnSetConvolutionMathType(
+template <typename Convolution> inline cudnnStatus_t cudnnSetConvolutionMathType_wrapper(
     Convolution convDesc, cudnnMathType_t mathType) {
   CUDA_DEBUG_LOG("cudnnSetConvolutionMathType(convDesc=" << PtrToStr(convDesc)
                  << ", mathType=" << static_cast<int>(mathType) << ")");
@@ -596,8 +767,9 @@ template <typename Convolution> inline cudnnStatus_t cudnnSetConvolutionMathType
   CUDA_DEBUG_LOG("cudnnSetConvolutionMathType -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetConvolutionMathType cudnnSetConvolutionMathType_wrapper
 
-template <typename Activation> inline cudnnStatus_t cudnnCreateActivationDescriptor(
+template <typename Activation> inline cudnnStatus_t cudnnCreateActivationDescriptor_wrapper(
     Activation* activationDesc) {
   CUDA_DEBUG_LOG("cudnnCreateActivationDescriptor(activationDesc=" 
                  << PtrToStr(activationDesc) << ")");
@@ -606,8 +778,9 @@ template <typename Activation> inline cudnnStatus_t cudnnCreateActivationDescrip
                  << ", *activationDesc=" << PtrToStr(*activationDesc));
   return result;
 }
+#define cudnnCreateActivationDescriptor cudnnCreateActivationDescriptor_wrapper
 
-template <typename Activation> inline cudnnStatus_t cudnnDestroyActivationDescriptor(
+template <typename Activation> inline cudnnStatus_t cudnnDestroyActivationDescriptor_wrapper(
     Activation activationDesc) {
   CUDA_DEBUG_LOG("cudnnDestroyActivationDescriptor(activationDesc=" 
                  << PtrToStr(activationDesc) << ")");
@@ -616,8 +789,9 @@ template <typename Activation> inline cudnnStatus_t cudnnDestroyActivationDescri
                  << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnDestroyActivationDescriptor cudnnDestroyActivationDescriptor_wrapper
 
-template <typename Activation> inline cudnnStatus_t cudnnSetActivationDescriptor(
+template <typename Activation> inline cudnnStatus_t cudnnSetActivationDescriptor_wrapper(
     Activation activationDesc,
     cudnnActivationMode_t mode, cudnnNanPropagation_t reluNanOpt, double coef) {
   CUDA_DEBUG_LOG("cudnnSetActivationDescriptor(activationDesc=" 
@@ -630,8 +804,9 @@ template <typename Activation> inline cudnnStatus_t cudnnSetActivationDescriptor
   CUDA_DEBUG_LOG("cudnnSetActivationDescriptor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnSetActivationDescriptor cudnnSetActivationDescriptor_wrapper
 
-template <typename Handle> inline cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize(
+template <typename Handle> inline cudnnStatus_t cudnnGetConvolutionForwardWorkspaceSize_wrapper(
     Handle handle,
     const cudnnTensorDescriptor_t xDesc,
     const cudnnFilterDescriptor_t wDesc,
@@ -648,9 +823,10 @@ template <typename Handle> inline cudnnStatus_t cudnnGetConvolutionForwardWorksp
                  << ", *sizeInBytes=" << *sizeInBytes);
   return result;
 }
+#define cudnnGetConvolutionForwardWorkspaceSize cudnnGetConvolutionForwardWorkspaceSize_wrapper
 
 template <typename T1, typename T2, typename T3, typename T4, typename T5>
-inline cudnnStatus_t cudnnConvolutionForward(
+inline cudnnStatus_t cudnnConvolutionForward_wrapper(
     cudnnHandle_t handle,
     const T1* alpha,
     const cudnnTensorDescriptor_t xDesc, const T2* x,
@@ -670,9 +846,10 @@ inline cudnnStatus_t cudnnConvolutionForward(
   CUDA_DEBUG_LOG("cudnnConvolutionForward -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnConvolutionForward cudnnConvolutionForward_wrapper
 
 template <typename T1, typename T2, typename T3, typename T4, typename T5, typename T6, typename T7>
-inline cudnnStatus_t cudnnConvolutionBiasActivationForward(
+inline cudnnStatus_t cudnnConvolutionBiasActivationForward_wrapper(
     cudnnHandle_t handle,
     const T1* alpha1,
     const cudnnTensorDescriptor_t xDesc, const T2* x,
@@ -696,9 +873,10 @@ inline cudnnStatus_t cudnnConvolutionBiasActivationForward(
                  << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnConvolutionBiasActivationForward cudnnConvolutionBiasActivationForward_wrapper
 
 template <typename T1, typename T2, typename T3>
-inline cudnnStatus_t cudnnActivationForward(
+inline cudnnStatus_t cudnnActivationForward_wrapper(
     cudnnHandle_t handle,
     cudnnActivationDescriptor_t activationDesc,
     const T1* alpha,
@@ -711,9 +889,10 @@ inline cudnnStatus_t cudnnActivationForward(
   CUDA_DEBUG_LOG("cudnnActivationForward -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnActivationForward cudnnActivationForward_wrapper
 
 template <typename T1, typename T2, typename T3>
-inline cudnnStatus_t cudnnAddTensor(
+inline cudnnStatus_t cudnnAddTensor_wrapper(
     cudnnHandle_t handle,
     const T1* alpha,
     const cudnnTensorDescriptor_t aDesc, const T2* A,
@@ -724,6 +903,7 @@ inline cudnnStatus_t cudnnAddTensor(
   CUDA_DEBUG_LOG("cudnnAddTensor -> " << cudnnGetErrorString(result));
   return result;
 }
+#define cudnnAddTensor cudnnAddTensor_wrapper
 
 #endif  // USE_CUDNN
 

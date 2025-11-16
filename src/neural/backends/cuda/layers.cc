@@ -915,7 +915,7 @@ void BaseLayer<half>::cublasRowMajorMatrixMul(const half* A, const half* B,
   ReportCUBLASErrors(cublasGemmStridedBatchedEx(
       cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &halfOne, B, CUDA_R_16F, N,
       N * K, A, CUDA_R_16F, K, K * M, &halfZero, Out, CUDA_R_16F, N, N * M,
-      batchSize, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
+      batchSize, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
 }
 
 template <>
@@ -929,7 +929,7 @@ void BaseLayer<float>::cublasRowMajorMatrixMul(const float* A, const float* B,
     ReportCUBLASErrors(cublasGemmStridedBatchedEx(
         cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &floatOne, B, CUDA_R_32F, N,
         N * K, A, CUDA_R_32F, K, K * M, &floatZero, Out, CUDA_R_32F, N, N * M,
-        batchSize, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
+        batchSize, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
   else
     // Much slower on RTX 2060.. why? Maybe a cublas bug :-/
     ReportCUBLASErrors(cublasSgemmStridedBatched(
@@ -1084,7 +1084,7 @@ void Conv1Layer<half>::cublasSpecialMatrixMul(const half* A, const half* B,
   ReportCUBLASErrors(cublasGemmStridedBatchedEx(
       cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &halfOne, B, CUDA_R_16F, N,
       N * K, A, CUDA_R_16F, K, 0, &halfZero, Out, CUDA_R_16F, N, N * M,
-      batchSize, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
+      batchSize, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
 }
 
 template <>
@@ -1100,7 +1100,7 @@ void Conv1Layer<float>::cublasSpecialMatrixMul(const float* A, const float* B,
     ReportCUBLASErrors(cublasGemmStridedBatchedEx(
         cublas, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &floatOne, B, CUDA_R_32F, N,
         N * K, A, CUDA_R_32F, K, 0, &floatZero, Out, CUDA_R_32F, N, N * M,
-        batchSize, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
+        batchSize, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
   else
     // Much slower on RTX 2060.. why? Maybe a cublas bug :-/
     ReportCUBLASErrors(cublasSgemmStridedBatched(
@@ -1615,13 +1615,13 @@ static void cublasXGemmStridedBatched(
     ReportCUBLASErrors(cublasGemmStridedBatchedEx(
         handle, transa, transb, m, n, k, &alpha_h, A, CUDA_R_16F, lda, strideA,
         B, CUDA_R_16F, ldb, strideB, &beta_h, C, CUDA_R_16F, ldc, strideC,
-        batchCount, CUDA_R_16F, CUBLAS_GEMM_DEFAULT));
+        batchCount, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
   } else {
     if (use_gemm_ex) {
       ReportCUBLASErrors(cublasGemmStridedBatchedEx(
           handle, transa, transb, m, n, k, &alpha, A, CUDA_R_32F, lda, strideA,
           B, CUDA_R_32F, ldb, strideB, &beta, C, CUDA_R_32F, ldc, strideC,
-          batchCount, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
+          batchCount, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     } else {
       ReportCUBLASErrors(cublasSgemmStridedBatched(
           handle, transa, transb, m, n, k, &alpha, (const float*)A, lda,
