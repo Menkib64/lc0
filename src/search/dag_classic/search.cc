@@ -508,7 +508,7 @@ bool TaskQueue::IsTasksIdle() const {
 
 size_t TaskQueue::Size() const { return task_threads_.size(); }
 
-void TaskQueue::StartANewSearch(size_t socket_id, size_t task_workers) {
+void TaskQueue::StartANewSearch(size_t task_workers) {
   int tasks = task_threads_.size();
   while (sleeping_threads_.load(std::memory_order_acquire) < tasks) {
     SpinloopPause();
@@ -521,9 +521,9 @@ void TaskQueue::StartANewSearch(size_t socket_id, size_t task_workers) {
   exiting_ = false;
 
   for (size_t i = 0; i < task_workers; i++) {
-    task_threads_.emplace_back([this, i, socket_id]() {
+    task_threads_.emplace_back([this, i]() {
       LOGFILE << "Task worker " << i << " starting.";
-      this->RunTasks(socket_id, i);
+      this->RunTasks(i);
       LOGFILE << "Task worker " << i << " exiting.";
     });
   }
@@ -641,8 +641,8 @@ void TaskQueue::DeactivateTasks() {
   active_users_.fetch_sub(1, std::memory_order_relaxed);
 }
 
-void TaskQueue::RunTasks(size_t socket_id, int tid) {
-  Numa::BindTaskWorkersToSocket(socket_id);
+void TaskQueue::RunTasks(int tid) {
+  Numa::BindTaskWorkersToSocket();
   while (true) {
     int nta = 0;
     int tc = 0;
@@ -678,8 +678,8 @@ void TaskQueue::PickTask::operator()(int tid) { DoTask(tid); }
 
 TaskQueue::PickTask::~PickTask() {}
 
-void SearchCachedState::StartANewSearch(size_t socket_id, int task_workers, int search_workers) {
-  task_queue_.StartANewSearch(socket_id, task_workers);
+void SearchCachedState::StartANewSearch(int task_workers, int search_workers) {
+  task_queue_.StartANewSearch(task_workers);
   task_workspaces_.resize(task_workers + search_workers);
   for (auto& w : task_workspaces_) {
     w.StartANewSearch();
@@ -1453,12 +1453,12 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
   return {};
 }
 
-void Search::StartThreads(size_t socket_id, size_t how_many) {
+void Search::StartThreads(size_t how_many) {
   if (how_many == 0 && threads_.size() == 0) {
     how_many = backend_attributes_.suggested_num_search_threads +
                !backend_attributes_.runs_on_cpu;
   }
-  Numa::ReserveSearchWorkers(socket_id, how_many);
+  Numa::ReserveSearchWorkers(how_many);
 
   int task_workers = params_.GetTaskWorkersPerSearchWorker();
   if (task_workers < 0) {
@@ -1468,7 +1468,7 @@ void Search::StartThreads(size_t socket_id, size_t how_many) {
       task_workers = std::min(std::thread::hardware_concurrency() - 1, 4U);
     }
   }
-  state_.StartANewSearch(socket_id, task_workers, how_many);
+  state_.StartANewSearch(task_workers, how_many);
   // Only one thread can do work until the root has been evaluated. Other
   // workers will wait until the first thread increases the thread_count_.
   total_workers_ = how_many;
@@ -1479,8 +1479,8 @@ void Search::StartThreads(size_t socket_id, size_t how_many) {
   }
   // First thread is a watchdog thread.
   if (threads_.size() == 0) {
-    threads_.emplace_back([this, socket_id]() {
-      Numa::BindTaskWorkersToSocket(socket_id);
+    threads_.emplace_back([this]() {
+      Numa::BindTaskWorkersToSocket();
       WatchdogThread();
     });
   }
@@ -1488,7 +1488,7 @@ void Search::StartThreads(size_t socket_id, size_t how_many) {
   // Start working threads.
   for (size_t i = 0; i < how_many; i++) {
     threads_.emplace_back([this, i, task_workers]() {
-      Numa::BindSearchWorker(i);
+      Numa::BindThread(i);
       SearchWorker worker(i + task_workers, state_.worker_states_[i], this,
                           params_);
       worker.RunBlocking();
@@ -1502,7 +1502,7 @@ void Search::StartThreads(size_t socket_id, size_t how_many) {
 }
 
 void Search::RunBlocking(size_t threads) {
-  StartThreads(0, threads);
+  StartThreads(threads);
   Wait();
 }
 

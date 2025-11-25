@@ -679,22 +679,21 @@ class CudaNetwork : public Network {
   }
 
   void GraphLaunch(InputsOutputs<DataType>* io, int batchSize) {
-#if !CUDA_GRAPH_SUPPORTS_EXTERNAL_EVENTS
+#if CUDA_GRAPH_SUPPORTS_EXTERNAL_EVENTS
+    io->cuda_graphs_[batchSize - 1].Launch(io->exec_stream_);
+#else
     if (!multi_stream_) {
       UploadInputs(io, batchSize);
 
       io->cuda_graphs_[batchSize - 1].Launch(compute_stream_);
       ReportCUDAErrors(
           cudaEventRecord(io->download_done_event_, compute_stream_));
-    } else
-#endif
-    {
+    } else {
       io->cuda_graphs_[batchSize - 1].Launch(io->exec_stream_);
-#if !CUDA_GRAPH_SUPPORTS_EXTERNAL_EVENTS
       ReportCUDAErrors(
           cudaEventRecord(io->download_done_event_, io->exec_stream_));
-#endif
     }
+#endif
   }
 
   void forwardEval(InputsOutputs<DataType>* io, int batchSize,
@@ -762,14 +761,8 @@ class CudaNetwork : public Network {
 #endif
     }
 
-    constexpr bool fp16 = std::is_same<half, DataType>::value;
-    if constexpr (fp16) {
-      expandPlanes_Fp16_NCHW((half*)(tensor_mem[0]), ipDataMasks, ipDataValues,
-                             batchSize * kInputPlanes, compute_stream);
-    } else {
-      expandPlanes_Fp32_NCHW((float*)(tensor_mem[0]), ipDataMasks, ipDataValues,
-                             batchSize * kInputPlanes, compute_stream);
-    }
+    expandPlanes_NCHW(tensor_mem[0], ipDataMasks, ipDataValues,
+                      batchSize * kInputPlanes, compute_stream);
 
     auto* opPol = io->op_policy_mem_gpu_;
     auto* opVal = io->op_value_mem_gpu_;
@@ -1005,7 +998,7 @@ class CudaNetwork : public Network {
         float sum = w + d + l;
         w /= sum;
         l /= sum;
-        d = 1.0f - w - l;
+        d /= sum;
         wdl[2 * i + 0] = w - l;
         wdl[2 * i + 1] = d;
       }

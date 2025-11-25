@@ -260,3 +260,7 @@ option('fixed_tt',
        value: true,
        description: 'Build dag using fixed size transposition table.')
 
+option('nvcc',
+       type: 'boolean',
+       value: true,
+       description: 'Use nvcc: required for cuda, optional for onnx')

@@ -214,4 +214,5 @@ std::unique_ptr<Backend> NetworkAsBackendFactory::Create(
   network_options.CheckAllOptionsRead(name_);
   return std::make_unique<NetworkAsBackend>(std::move(network), options);
 }
+
 }  // namespace lczero

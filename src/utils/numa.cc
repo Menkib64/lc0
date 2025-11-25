@@ -25,374 +25,593 @@
   Program grant you additional permission to convey the resulting work.
 */
 
+#include "utils/numa.h"
+
 #include "numa_config.h"
-#if HAVE_PTHREAD_SETAFFINITY_NP
-#include <pthread.h>
-#include <unistd.h>
+#if HAVE_LIBHWLOC
+#include <hwloc.h>
 #endif
 
-#include "utils/numa.h"
-#include <string.h>
+#include <cassert>
+#include <cstring>
+#include <mutex>
+#include <random>
+#if __has_include(<source_location>)
+#include <source_location>
+#endif
+#include <sstream>
+#include <system_error>
 
-#include "chess/bitboard.h"
 #include "utils/logging.h"
-
+#include "utils/optionsparser.h"
 #ifdef _WIN32
+// clang-format off
 #include <windows.h>
+#include <tlhelp32.h>
+// clang-format on
 #endif
 
 namespace lczero {
 
 namespace {
 
-struct Config {
-  struct LogicalProcessor {
-    unsigned cpu_;
-    unsigned core_;
-    unsigned socket_;
-    unsigned node_;
-  };
+const OptionId kUseThreadAfinityOptionId{
+    {.long_flag = "use-thread-affinity",
+     .uci_option = "UseThreadAffinity",
+     .help_text = "Pin search and task worker threads to specific CPU cores "
+                  "to improve execution latency.",
+     .visibility = OptionId::kAlwaysVisible}};
+const OptionId kUseAllCoresOptionId{
+    {.long_flag = "use-all-cores",
+     .uci_option = "UseAllCores",
+     .help_text = "Default is to use only core which were included in the "
+                  "initial CPU affinity mask. This options allows search and "
+                  "task workers to use cores also outside the initial set.",
+     .visibility = OptionId::kProOnly}};
+const OptionId kSearchNodeOptionId{
+    {.long_flag = "search-numa-node",
+     .uci_option = "SearchNUMANode",
+     .help_text = "The NUMA node to use for the search threads.",
+     .visibility = OptionId::kProOnly}};
+const OptionId kShuffleCoreReservationOptionId{
+    {.long_flag = "shuffle-core-reservation",
+     .uci_option = "ShuffleCoreReservation",
+     .help_text = "Randomize the core reservation order to reduce contention "
+                  "when multiple lc0 instances are running.",
+     .visibility = OptionId::kProOnly}};
 
-  Config() = default;
-
-  Config(std::vector<LogicalProcessor>& logical_processors)
-      : logical_processors_(logical_processors) {
-    sort();
-    size_t nodes = 0;
-    size_t current_node = -1;
-    size_t sockets = 0;
-    size_t current_socket = -1;
-    size_t cores = 0;
-    size_t current_core = -1;
-    for (const auto& lp : logical_processors_) {
-      if (current_node != lp.node_) {
-        current_node = lp.node_;
-        nodes++;
-      }
-      if (current_socket != lp.socket_) {
-        current_socket = lp.socket_;
-        sockets++;
-        cores += current_core + 1;
-        current_core = 0;
-      }
-      current_core = std::max(current_core, static_cast<size_t>(lp.core_));
-    }
-    nodes_ = nodes;
-    sockets_ = sockets;
-    cores_ = cores + current_core + 1;
+#if HAVE_LIBHWLOC
+template <typename T>
+void ReportHWLocError(T result
+#if __cpp_lib_source_location >= 201907L
+                      ,
+                      std::source_location loc = std::source_location::current()
+#endif
+) {
+  if (result != 0) {
+    std::ostringstream ss;
+    ss << "HWLoc error "
+#if __cpp_lib_source_location >= 201907L
+          "at "
+       << loc.file_name() << ":" << loc.line() << " - "
+#endif
+       << result << ": " << std::system_category().message(errno);
+    CERR << ss.str();
+    throw Exception(ss.str());
   }
-
-  template <typename Func>
-  void ForEachOnSocket(size_t socket_id, Func func) const {
-    assert(socket_id < GetSocketCount());
-    for (const auto& lp : logical_processors_) {
-      if (lp.socket_ == socket_id) {
-        func(lp.cpu_);
-      }
-    }
+}
+template <typename T>
+void ReportHWLocError(T* result
+#if __cpp_lib_source_location >= 201907L
+                      ,
+                      std::source_location loc = std::source_location::current()
+#endif
+) {
+  if (result == nullptr) {
+    std::ostringstream ss;
+    ss << "HWLoc error "
+#if __cpp_lib_source_location >= 201907L
+          "at "
+       << loc.file_name() << ":" << loc.line() << " - "
+#endif
+       << std::system_category().message(errno);
+    CERR << ss.str();
+    throw Exception(ss.str());
   }
+}
 
-  template <typename Func>
-  void ForEachCore(size_t logical_id, Func func) const {
-    assert(logical_id < GetThreadCount());
-    const auto& lp = logical_processors_[logical_id];
-    for (const auto& other_lp : logical_processors_) {
-      if (other_lp.core_ == lp.core_ && other_lp.socket_ == lp.socket_ &&
-          other_lp.node_ == lp.node_) {
-        func(other_lp.cpu_);
-      }
-    }
-  }
-
-  void ReserveCoreOnSocket(size_t socket_id) {
-    assert(socket_id < GetSocketCount());
-    bool socket_found = false;
-    size_t core_id;
-    for (const auto& lp : logical_processors_) {
-      if (socket_found && lp.socket_ == socket_id && lp.core_ == core_id) {
-        reserved_processors_.push_back(lp);
-      }
-      if (!socket_found && lp.socket_ == socket_id) {
-        core_id = lp.core_;
-        reserved_processors_.push_back(lp);
-        socket_found = true;
-      }
-    }
-    logical_processors_.erase(
-        std::remove_if(logical_processors_.begin(), logical_processors_.end(),
-                       [&](const LogicalProcessor& lp) {
-                         return lp.socket_ == socket_id && lp.core_ == core_id;
-                       }),
-        logical_processors_.end());
-  }
-
-  bool CheckReservedCores(size_t socket_id, size_t num_workers) {
-    size_t reserved_cores = 0;
-    size_t core = -1;
-    for (const auto& lp : reserved_processors_) {
-      if (lp.socket_ != socket_id) {
-        break;
-      }
-      if (lp.core_ != core) {
-        core = lp.core_;
-        reserved_cores++;
-      }
-    }
-    if (reserved_cores == num_workers) return true;
-
-    std::copy(reserved_processors_.begin(), reserved_processors_.end(),
-              std::back_inserter(logical_processors_));
-    reserved_processors_.clear();
-    sort();
-    return false;
-  }
-
-  void sort() {
-    std::sort(logical_processors_.begin(), logical_processors_.end(),
-              [](const auto& a, const auto& b) { return a.cpu_ < b.cpu_; });
-  }
-
-  size_t GetThreadCount() const { return logical_processors_.size(); }
-  size_t GetCoreCount() const { return cores_; }
-  size_t GetSocketCount() const { return sockets_; }
-  size_t GetNodeCount() const { return nodes_; }
-
-  size_t cores_ = 0;
-  size_t sockets_ = 0;
-  size_t nodes_ = 0;
-  std::vector<LogicalProcessor> logical_processors_;
-  std::vector<LogicalProcessor> reserved_processors_;
-};
-
-#if HAVE_PTHREAD_SETAFFINITY_NP
-
-#define USE_THREAD_AFINITTY 1
-
-class LSCPUInit {
+class CpuSet {
  public:
-  LSCPUInit() : pipe_(popen("lscpu -p", "r")) {
-    if (!pipe_) {
-      CERR << "Failed to run lscpu. Assumming single socket system with one "
-              "thread per core. Install lscpu to enable NUMA support.";
-      std::vector<Config::LogicalProcessor> logical_processors;
-      for (unsigned cpu = 0; cpu < std::thread::hardware_concurrency(); cpu++) {
-        logical_processors.push_back({cpu, cpu, 0, 0});
-      }
-      configs_ = Config(logical_processors);
-      return;
-    }
+  CpuSet() : cpuset_(hwloc_bitmap_alloc()) { ReportHWLocError(cpuset_); }
+
+  ~CpuSet() { hwloc_bitmap_free(cpuset_); }
+
+  CpuSet(CpuSet&& other) : cpuset_(other.cpuset_) { other.cpuset_ = nullptr; }
+
+  CpuSet& operator=(CpuSet&& other) {
+    std::swap(cpuset_, other.cpuset_);
+    return *this;
   }
 
-  ~LSCPUInit() { Close(); }
+  void Clear() { hwloc_bitmap_zero(cpuset_); }
 
-  void Close() {
-    if (!pipe_) return;
-    pclose(pipe_);
-    pipe_ = nullptr;
+  void Set(size_t cpu) { ReportHWLocError(hwloc_bitmap_set(cpuset_, cpu)); }
+  void Unset(size_t cpu) { ReportHWLocError(hwloc_bitmap_clr(cpuset_, cpu)); }
+  bool IsSet(size_t cpu) const { return hwloc_bitmap_isset(cpuset_, cpu); }
+
+  bool operator==(const CpuSet& other) const {
+    return hwloc_bitmap_isequal(cpuset_, other.cpuset_);
   }
 
-  Config& ReadConfig() {
-    if (!pipe_) return configs_;
-    std::vector<Config::LogicalProcessor> configs;
-    char buffer[128];
-    std::string result = "";
-    while (fgets(buffer, sizeof(buffer), pipe_) != NULL) {
-      if (buffer[0] == '#') continue;
-
-      Config::LogicalProcessor config;
-
-      sscanf(buffer, "%u,%u,%u,%u", &config.cpu_, &config.core_,
-             &config.socket_, &config.node_);
-
-      configs.push_back(config);
-    }
-
-    Close();
-    configs_ = Config(configs);
-    return configs_;
+  CpuSet& operator&=(const CpuSet& other) {
+    ReportHWLocError(hwloc_bitmap_and(cpuset_, cpuset_, other.cpuset_));
+    return *this;
   }
+  CpuSet& operator|=(const CpuSet& other) {
+    ReportHWLocError(hwloc_bitmap_or(cpuset_, cpuset_, other.cpuset_));
+    return *this;
+  }
+  CpuSet& operator^=(const CpuSet& other) {
+    ReportHWLocError(hwloc_bitmap_xor(cpuset_, cpuset_, other.cpuset_));
+    return *this;
+  }
+
+  CpuSet& operator&=(const hwloc_bitmap_t other) {
+    ReportHWLocError(hwloc_bitmap_and(cpuset_, cpuset_, other));
+    return *this;
+  }
+  CpuSet& operator|=(const hwloc_bitmap_t other) {
+    ReportHWLocError(hwloc_bitmap_or(cpuset_, cpuset_, other));
+    return *this;
+  }
+  CpuSet& operator^=(const hwloc_bitmap_t other) {
+    ReportHWLocError(hwloc_bitmap_xor(cpuset_, cpuset_, other));
+    return *this;
+  }
+
+  CpuSet operator~() const {
+    CpuSet result;
+    ReportHWLocError(hwloc_bitmap_not(result.cpuset_, cpuset_));
+    return result;
+  }
+  explicit operator bool() const { return !hwloc_bitmap_iszero(cpuset_); }
+
+  size_t Count() const { return hwloc_bitmap_weight(cpuset_); }
+
+  operator hwloc_cpuset_t() const { return cpuset_; }
 
  private:
-  FILE* pipe_;
-  Config configs_;
-} numa_config;
+  hwloc_cpuset_t cpuset_;
+};
 
+struct Config {
+  // https://nuclear.llnl.gov/CNP/rng/rngman/node4.html
+  using GeneratorType =
+      std::linear_congruential_engine<uint64_t, 2862933555777941757, 3037000493,
+                                      0>;
+  Config() : rng_(std::random_device{}()) {
+    ReportHWLocError(hwloc_topology_init(&initial_topology_));
+    // TODO: Add filters to make discovery faster.
+    // TODO: Maybe use xml loading instead of detection.
+    ReportHWLocError(hwloc_topology_load(initial_topology_));
+    ReportHWLocError(hwloc_topology_dup(&topology_, initial_topology_));
+#if HWLOC_API_VERSION >= 0x00020400
+    effiency_.resize(hwloc_cpukinds_get_nr(topology_, 0));
+    for (size_t i = 0; i < effiency_.size(); i++) {
+      CpuSet cpuset;
+      int eff;
+      ReportHWLocError(hwloc_cpukinds_get_info(topology_, i, cpuset, &eff,
+                                               nullptr, nullptr, 0));
+
+      effiency_[eff < 0 ? 0 : eff] |= cpuset;
+    }
 #endif
+
+    if (IsAffinitySupported()) {
+      use_search_thread_affinity_ = true;
+      GetAffinity(initial_affinity_);
+    } else {
+      CERR << "HWLoc reports that thread CPU affinity is not supported on this "
+              "system. Disabling thread affinity.";
+      use_search_thread_affinity_ = false;
+    }
+  }
+
+  bool IsAffinitySupported() const {
+    const auto* support = hwloc_topology_get_support(topology_);
+    return support->cpubind->get_thread_cpubind;
+  }
+
+  ~Config() {
+    if (initial_topology_) hwloc_topology_destroy(initial_topology_);
+    if (topology_) hwloc_topology_destroy(topology_);
+  }
+
+  void SetAffinity(const CpuSet& cpuset_) {
+    assert(topology_);
+    assert(cpuset_);
+    ReportHWLocError(
+        hwloc_set_cpubind(topology_, cpuset_, HWLOC_CPUBIND_THREAD));
+  }
+
+  void GetAffinity(CpuSet& cpuset_) {
+    assert(topology_);
+    ReportHWLocError(
+        hwloc_get_cpubind(topology_, cpuset_, HWLOC_CPUBIND_THREAD));
+  }
+
+  void SetAffintyAll(const CpuSet& cpuset_) {
+    assert(topology_);
+    assert(cpuset_);
+#if _WIN32
+    HANDLE snapshot =
+        CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) {
+      CERR << "Failed to create thread snapshot. Error code: "
+           << std::system_category().message(GetLastError());
+      SetAffinity(cpuset_);
+      return;
+    }
+    THREADENTRY32 te = {};
+    te.dwSize = sizeof(THREADENTRY32);
+    if (!Thread32First(snapshot, &te)) {
+      CERR << "Failed to get first thread from snapshot. Error code: "
+           << std::system_category().message(GetLastError());
+      CloseHandle(snapshot);
+      SetAffinity(cpuset_);
+      return;
+    }
+    do {
+      if (te.dwSize >=
+          FIELD_OFFSET(THREADENTRY32, th32ThreadID) + sizeof(te.th32ThreadID)) {
+        HANDLE thread =
+            OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE,
+                       te.th32ThreadID);
+        if (!thread) {
+          CERR << "Failed to open thread " << te.th32ThreadID
+               << ". Error code: "
+               << std::system_category().message(GetLastError());
+        } else {
+          CERR << "Setting affinity for thread " << te.th32ThreadID << ".";
+          ReportHWLocError(hwloc_set_thread_cpubind(topology_, thread, cpuset_,
+                                                    HWLOC_CPUBIND_THREAD));
+          CloseHandle(thread);
+        }
+      }
+      te.dwSize = sizeof(THREADENTRY32);
+    } while (Thread32Next(snapshot, &te));
+    CloseHandle(snapshot);
+#else
+    assert(topology_);
+    ReportHWLocError(
+        hwloc_set_cpubind(topology_, cpuset_, HWLOC_CPUBIND_PROCESS));
+#endif
+  }
+
+  void ProcessProcessors() {
+    hwloc_topology_destroy(topology_);
+
+    ReportHWLocError(hwloc_topology_dup(&topology_, initial_topology_));
+    if (!use_all_cores_) {
+      ReportHWLocError(hwloc_topology_restrict(
+          topology_, initial_affinity_, HWLOC_RESTRICT_FLAG_REMOVE_CPULESS));
+    }
+  }
+
+  void GetNumaSet(size_t numa_id, CpuSet& cpuset) const {
+    assert(numa_id < GetNodeCount());
+    hwloc_obj_t node_obj;
+    ReportHWLocError(node_obj = hwloc_get_obj_by_type(
+                         topology_, HWLOC_OBJ_NUMANODE, numa_id));
+    cpuset |= node_obj->cpuset;
+    cpuset &= ~reserved_set_;
+    if (!cpuset) {
+      // all reserved, return full socket
+      cpuset |= node_obj->cpuset;
+    }
+  }
+
+  struct ObjectIterator {
+    using iterator_category = std::bidirectional_iterator_tag;
+    using value_type = hwloc_obj_t;
+    using difference_type = std::ptrdiff_t;
+    using pointer = hwloc_obj_t;
+    using reference = hwloc_obj_t&;
+
+    const hwloc_topology_t topology_;
+    hwloc_obj_t current_;
+
+    ObjectIterator& operator++() {
+      current_ = current_->next_cousin;
+      return *this;
+    }
+    ObjectIterator operator++(int) {
+      ObjectIterator temp = *this;
+      return ++temp;
+    }
+    ObjectIterator& operator--() {
+      current_ = current_->prev_cousin;
+      return *this;
+    }
+    ObjectIterator operator--(int) {
+      ObjectIterator temp = *this;
+      return --temp;
+    }
+    auto operator<=>(const ObjectIterator& other) const {
+      return current_->logical_index <=> other.current_->logical_index;
+    }
+    bool operator==(const ObjectIterator& other) const {
+      return current_ == other.current_;
+    }
+
+    hwloc_obj_t operator*() const { return current_; }
+    hwloc_obj_t operator->() const { return current_; }
+  };
+
+  struct ObjectRange {
+    const hwloc_topology_t topology_;
+    hwloc_obj_t parent_;
+    hwloc_obj_type_t type_;
+
+    ObjectIterator begin() const {
+      hwloc_obj_t parent = parent_;
+      while (parent && parent->type != type_) {
+        parent = parent->first_child;
+      }
+      return ObjectIterator{topology_, parent};
+    }
+    ObjectIterator end() const {
+      hwloc_obj_t parent = parent_;
+      while (parent && parent->type != type_) {
+        parent = parent->last_child;
+      }
+      return ObjectIterator{topology_, parent->next_cousin};
+    }
+  };
+
+  void ReserveCoresOnNode(size_t node_id, size_t count) {
+    hwloc_obj_t numa_obj;
+    reserved_set_.Clear();
+    reserved_cores_.clear();
+
+    ReportHWLocError(numa_obj = hwloc_get_obj_by_type(
+                         topology_, HWLOC_OBJ_NUMANODE, node_id));
+    ReserveCores(numa_obj, count);
+  }
+
+  void ReserveCores(size_t count) {
+    hwloc_obj_t root_obj = hwloc_get_root_obj(topology_);
+    reserved_set_.Clear();
+    reserved_cores_.clear();
+
+    ReserveCores(root_obj, count);
+  }
+
+  void ReserveCores(hwloc_obj_t parent, size_t count) {
+    ObjectRange cores{topology_, parent, HWLOC_OBJ_CORE};
+    std::vector<hwloc_obj_t> core_objs;
+    std::copy(cores.begin(), cores.end(), std::back_inserter(core_objs));
+    // Use random shuffle to avoid using same cores for all SearchWorkers when
+    // multiple lc0 process are runnig at the same time.
+    if (shuffle_reservations_) {
+      GeneratorType rng_copy = rng_;
+      std::shuffle(core_objs.begin(), core_objs.end(), rng_copy);
+      rng_ = rng_copy;
+    }
+    std::stable_sort(
+        core_objs.begin(), core_objs.end(),
+        [this](hwloc_obj_t a, hwloc_obj_t b) {
+          if (effiency_.size() > 1) {
+            for (const auto& eff_set : effiency_) {
+              bool a_in_eff = hwloc_bitmap_intersects(a->cpuset, eff_set);
+              bool b_in_eff = hwloc_bitmap_intersects(b->cpuset, eff_set);
+              if (a_in_eff != b_in_eff) {
+                return a_in_eff;  // prefer less efficient cores
+              }
+              if (a_in_eff) break;
+            }
+          }
+          return a->arity > b->arity;
+        });
+    unsigned arity = 2;
+    // duplicate cores until all threads have PU or there is no more PUs
+    while (core_objs.size() < count && core_objs.front()->arity >= arity) {
+      CERR << core_objs.size() << " cores reserved, need " << count
+           << ", adding cores with arity >= " << arity << ".";
+      std::copy_if(core_objs.begin(), core_objs.end(),
+                   std::back_inserter(core_objs),
+                   [arity](hwloc_obj_t obj) { return obj->arity >= arity; });
+      arity++;
+    }
+    if (core_objs.size() > count) {
+      CERR << "Only " << count
+           << " cores requested, trimming reserved cores from "
+           << core_objs.size() << ".";
+      core_objs.erase(core_objs.begin() + count, core_objs.end());
+    }
+    std::for_each(core_objs.begin(), core_objs.end(),
+                  [&](hwloc_obj_t obj) { reserved_set_ |= obj->cpuset; });
+    reserved_cores_ = std::move(core_objs);
+  }
+
+  void GetCoreForThread(size_t id, CpuSet& cpuset) {
+    id %= reserved_cores_.size();
+
+    hwloc_obj_t core = reserved_cores_[id];
+
+    cpuset |= core->cpuset;
+  }
+
+  bool CheckReservedCores(size_t num_workers) {
+    return reserved_cores_.size() == num_workers;
+  }
+
+  bool CheckReservedCores(size_t node_id, size_t num_workers) {
+    if (reserved_cores_.size() != num_workers) return false;
+    hwloc_obj_t node_obj;
+    ReportHWLocError(node_obj = hwloc_get_obj_by_type(
+                         topology_, HWLOC_OBJ_NUMANODE, node_id));
+    for (auto core : reserved_cores_) {
+      if (!hwloc_bitmap_intersects(node_obj->cpuset, core->cpuset)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  class ConfigLock {
+   public:
+    explicit ConfigLock(Config& config)
+        : config_(config), lock_(config.mutex_) {}
+    ConfigLock(const ConfigLock&) = delete;
+    ConfigLock& operator=(const ConfigLock&) = delete;
+    ~ConfigLock() {}
+    Config* operator->() { return &config_; }
+
+   private:
+    Config& config_;
+    std::unique_lock<std::mutex> lock_;
+  };
+
+  void SetOptions(const OptionsDict& options) { options_ = &options; }
+
+  void UpdateOptions() {
+    bool all_cores = options_->Get<bool>(kUseAllCoresOptionId);
+    bool shuffle_reservations =
+        options_->Get<bool>(kShuffleCoreReservationOptionId);
+    use_search_thread_affinity_ =
+        options_->Get<bool>(kUseThreadAfinityOptionId) && IsAffinitySupported();
+    size_t node_id = options_->Get<int>(kSearchNodeOptionId);
+    if (all_cores != use_all_cores_) {
+      use_all_cores_ = all_cores;
+      reserved_set_.Clear();
+      reserved_cores_.clear();
+      ProcessProcessors();
+    }
+    if (shuffle_reservations != shuffle_reservations_) {
+      shuffle_reservations_ = shuffle_reservations;
+      reserved_set_.Clear();
+      reserved_cores_.clear();
+    }
+    if (node_id >= GetNodeCount()) {
+      CERR << "Requested search NUMA node " << node_id << " but only "
+           << GetNodeCount() << " nodes available. "
+           << "Using node " << GetNodeCount() - 1 << " instead." << std::endl;
+      node_id = GetNodeCount() - 1;
+    }
+    search_node_id_ = node_id;
+  }
+
+  static ConfigLock Lock() { return ConfigLock(Instance()); }
+
+  static Config& Instance() {
+    static Config instance{};
+    return instance;
+  }
+
+  size_t GetThreadCount() const {
+    return hwloc_get_nbobjs_by_type(topology_, HWLOC_OBJ_PU);
+  }
+  size_t GetMaxThread() const {
+    return hwloc_get_obj_by_type(topology_, HWLOC_OBJ_PU, GetThreadCount() - 1)
+        ->logical_index;
+  }
+  size_t GetCoreCount() const {
+    return hwloc_get_nbobjs_by_type(topology_, HWLOC_OBJ_CORE);
+  }
+  size_t GetSocketCount() const {
+    return hwloc_get_nbobjs_by_type(topology_, HWLOC_OBJ_PACKAGE);
+  }
+  size_t GetNodeCount() const {
+    return hwloc_get_nbobjs_by_type(topology_, HWLOC_OBJ_NUMANODE);
+  }
+
+  CpuSet initial_affinity_;
+  CpuSet reserved_set_;
+  std::vector<hwloc_obj_t> reserved_cores_;
+  const OptionsDict* options_ = nullptr;
+  bool use_search_thread_affinity_ = true;
+  bool use_all_cores_ = false;
+  bool shuffle_reservations_ = true;
+  size_t search_node_id_ = 0;
+  GeneratorType rng_;
+
+  hwloc_topology_t topology_ = nullptr;
+  hwloc_topology_t initial_topology_;
+  std::vector<CpuSet> effiency_;
+  mutable std::mutex mutex_;
+};
+#endif
+
 }  // namespace
 
-int Numa::threads_per_core_ = 1;
-
-void Numa::Init() {
-#if defined(_WIN64) && _WIN32_WINNT >= 0x0601
-  SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* buffer;
-  DWORD len = 0;
-  GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
-  buffer = static_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(malloc(len));
-  GetLogicalProcessorInformationEx(RelationProcessorCore, buffer, &len);
-  if (buffer->Processor.Flags & LTP_PC_SMT) {
-    threads_per_core_ = BitBoard(buffer->Processor.GroupMask[0].Mask).count();
-  }
-  free(buffer);
-
-  int group_count = GetActiveProcessorGroupCount();
-  int thread_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-  int core_count = thread_count / threads_per_core_;
-  CERR << "Detected " << core_count << " core(s) and " << thread_count
-       << " thread(s) in " << group_count << " group(s).";
-  for (int group_id = 0; group_id < group_count; group_id++) {
-    int group_threads = GetActiveProcessorCount(group_id);
-    int group_cores = group_threads / threads_per_core_;
-    CERR << "Group " << group_id << " has " << group_cores << " core(s) and "
-         << group_threads << " thread(s).";
-  }
-#elif HAVE_PTHREAD_SETAFFINITY_NP
-  const auto& config = numa_config.ReadConfig();
-  size_t threads = config.GetThreadCount();
-  size_t cores = config.GetCoreCount();
-  size_t nodes = config.GetNodeCount();
+void Numa::Init(OptionsParser* parser) {
+  parser->Add<BoolOption>(kUseThreadAfinityOptionId) = true;
+  parser->Add<BoolOption>(kUseAllCoresOptionId) = false;
+  parser->Add<BoolOption>(kShuffleCoreReservationOptionId) = true;
+  parser->Add<IntOption>(kSearchNodeOptionId, 0, 512) = 0;
+#if HAVE_LIBHWLOC
+  auto config = Config::Lock();
+  config->SetOptions(parser->GetOptionsDict());
+  size_t threads = config->GetThreadCount();
+  size_t cores = config->GetCoreCount();
+  size_t sockets = config->GetSocketCount();
+  size_t nodes = config->GetNodeCount();
   CERR << "Detected " << cores << (cores == 1 ? " core and " : " cores and ")
-       << threads << (threads == 1 ? " thread in " : " threads in ") << nodes
-       << (nodes == 1 ? " node." : " nodes.");
+       << threads << (threads == 1 ? " thread in " : " threads in ") << sockets
+       << (sockets == 1 ? " socket in " : " sockets in ") << nodes
+       << (nodes == 1 ? " node." : " nodes.") << " The highest thread id is "
+       << config->GetMaxThread() << ".";
+#else
+  CERR << "libhwloc support not compiled in.";
 #endif
 }
 
-void Numa::BindThread([[maybe_unused]] int id) {
-#if defined(_WIN64) && _WIN32_WINNT >= 0x0601
-  int group_count = GetActiveProcessorGroupCount();
-  int thread_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-  int core_count = thread_count / threads_per_core_;
-  int core_id = id;
-  GROUP_AFFINITY affinity = {};
-  for (int group_id = 0; group_id < group_count; group_id++) {
-    int group_threads = GetActiveProcessorCount(group_id);
-    int group_cores = group_threads / threads_per_core_;
-    // Allocate cores of each group in order, and distribute remaining threads
-    // to all groups.
-    if ((id < core_count && core_id < group_cores) ||
-        (id >= core_count && (id - core_count) % group_count == group_id)) {
-      affinity.Group = group_id;
-      affinity.Mask = ~0ULL >> (64 - group_threads);
-      SetThreadGroupAffinity(GetCurrentThread(), &affinity, NULL);
-      break;
+void Numa::BindThread([[maybe_unused]] size_t id) {
+#if HAVE_LIBHWLOC
+  auto config = Config::Lock();
+  if (!config->use_search_thread_affinity_) return;
+  if (!config->reserved_set_) return;
+  CpuSet cpuset;
+  config->GetCoreForThread(id, cpuset);
+  config->SetAffinity(cpuset);
+#endif
+}
+
+void Numa::ReserveSearchWorkers([[maybe_unused]] size_t num_workers,
+                                bool runs_on_cpu) {
+#if HAVE_LIBHWLOC
+  auto config = Config::Lock();
+  config->UpdateOptions();
+  if (!config->use_search_thread_affinity_) return;
+  unsigned node_id = config->search_node_id_;
+  if (runs_on_cpu) {
+    if (config->CheckReservedCores(node_id, num_workers)) {
+      return;
     }
-    core_id -= group_cores;
-  }
-#elif HAVE_PTHREAD_SETAFFINITY_NP
-  const auto& config = numa_config.ReadConfig();
-  id %= config.GetThreadCount();
-  auto thread = pthread_self();
-  cpu_set_t cpuset;
-  CPU_ZERO(&cpuset);
-  config.ForEachCore(id, [&](unsigned cpu_id) { CPU_SET(cpu_id, &cpuset); });
-  int err;
-  if ((err = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset))) {
-    CERR << "Failed to set thread affinity. Error code: " << err;
-  }
-#endif
-}
-
-void Numa::ReserveSearchWorkers(size_t socket_id, size_t num_workers) {
-  if (num_workers == 0) return;
-#if HAVE_PTHREAD_SETAFFINITY_NP
-  auto& config = numa_config.ReadConfig();
-  if (socket_id >= config.GetSocketCount()) {
-    CERR << "Requested to reserve workers on invalid socket " << socket_id
-         << ". Only " << config.GetSocketCount()
-         << " socket(s) available. Using socket "
-         << (config.GetSocketCount() - 1) << " instead.";
-    socket_id = config.GetSocketCount() - 1;
-  }
-  if (config.CheckReservedCores(socket_id, num_workers)) {
-    return;
-  }
-  for (size_t i = 0; i < num_workers; i++) {
-    config.ReserveCoreOnSocket(socket_id);
-  }
-
-  std::sort(
-      config.reserved_processors_.begin(), config.reserved_processors_.end(),
-      [](const Config::LogicalProcessor& a, const Config::LogicalProcessor& b) {
-        return a.core_ < b.core_;
-      });
-  cpu_set_t cpuset, emptyset;
-  auto thread = pthread_self();
-  int err;
-  if ((err = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset))) {
-    CERR << "Failed to get thread affinity. Error code: " << err;
-    return;
-  }
-  for (const auto& rp : config.reserved_processors_) {
-    CPU_CLR(rp.cpu_, &cpuset);
-  }
-  if ((err = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset))) {
-    CERR << "Failed to remove reserved affinity. Error code: " << err;
-  }
-  CPU_ZERO(&emptyset);
-  if (CPU_EQUAL(&cpuset, &emptyset)) {
-    return;
-  }
-  std::ostringstream ss;
-  std::array<unsigned long, sizeof(cpuset) / sizeof(unsigned long)> bitset;
-  memcpy((void*)bitset.data(), &cpuset, sizeof(cpuset));
-
-  ss << "pgrep -wg " << getpid() << " | xargs -n1 taskset -p " << std::hex;
-
-  auto start = std::find_if(bitset.rbegin(), bitset.rend(),
-                            [](const auto& a) { return a != 0; });
-  if (start != bitset.rend()) {
-    ss << *start++ << std::setfill('0');
-  }
-  std::for_each(start, bitset.rend(),
-                [&](const auto& a) { ss << std::setw(sizeof(a) * 2) << a; });
-
-  ss << " > /dev/null";
-
-  if ((err = std::system(ss.str().c_str()))) {
-    CERR << "Failed to run command:" << ss.str();
-    CERR << "Error code: " << err;
-  }
-#endif
-}
-
-void Numa::BindSearchWorker(size_t id) {
-#if HAVE_PTHREAD_SETAFFINITY_NP
-  auto& config = numa_config.ReadConfig();
-  if (config.reserved_processors_.empty()) return;
-  size_t core = -1;
-  for (const auto& processor : config.reserved_processors_) {
-    if (processor.core_ != core) {
-      core = processor.core_;
-      if (id-- == 0) break;
+    config->ReserveCoresOnNode(node_id, num_workers);
+  } else {
+    if (config->CheckReservedCores(num_workers)) {
+      return;
     }
+    config->ReserveCores(num_workers);
   }
-  cpu_set_t cpuset;
-  auto thread = pthread_self();
-  int err;
-  CPU_ZERO(&cpuset);
-  for (const auto& processor : config.reserved_processors_) {
-    if (processor.core_ == core) {
-      CPU_SET(processor.cpu_, &cpuset);
-    }
-  }
-  if ((err = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset))) {
-    CERR << "Failed to set search worker affinity. Error code: " << err;
-  }
+
+  CpuSet cpuset;
+  cpuset |= config->initial_affinity_;
+  cpuset &= ~config->reserved_set_;
+
+  config->SetAffintyAll(!cpuset ? config->initial_affinity_ : cpuset);
 #endif
 }
 
-void Numa::BindTaskWorkersToSocket(size_t socket_id) {
-#if HAVE_PTHREAD_SETAFFINITY_NP
-  auto& config = numa_config.ReadConfig();
-  socket_id = std::min(socket_id, config.GetSocketCount() - 1);
-  cpu_set_t cpuset;
-  CPU_ZERO(&cpuset);
-  config.ForEachOnSocket(socket_id,
-                         [&](unsigned cpu_id) { CPU_SET(cpu_id, &cpuset); });
-  auto thread = pthread_self();
-  int err;
-  if ((err = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset))) {
-    CERR << "Failed to set task workers affinity. Error code: " << err;
-  }
+void Numa::BindTaskWorkersToSocket() {
+#if HAVE_LIBHWLOC
+  auto config = Config::Lock();
+  if (!config->use_search_thread_affinity_) return;
+  CpuSet cpuset;
+  config->GetNumaSet(config->search_node_id_, cpuset);
+  config->SetAffinity(cpuset);
 #endif
 }
 }  // namespace lczero

@@ -210,11 +210,11 @@ class TaskQueue {
   void DeactivateTasks();
 
   // Make sure the state matches the latest user configuration.
-  void StartANewSearch(size_t socket_id, size_t task_workers);
+  void StartANewSearch(size_t task_workers);
 
  private:
   void ShutdownThreads();
-  void RunTasks(size_t socket_id, int tid);
+  void RunTasks(int tid);
 
   std::vector<std::thread> task_threads_;
   bool exiting_ = false;
@@ -243,7 +243,7 @@ class Search {
   ~Search();
 
   // Starts worker threads and returns immediately.
-  void StartThreads(size_t socket_id, size_t how_many);
+  void StartThreads(size_t how_many);
 
   // Starts search with k threads and wait until it finishes.
   void RunBlocking(size_t threads);
@@ -782,7 +782,7 @@ struct SearchWorkerCachedState {
 
 // Cached state between subsequent searches.
 struct SearchCachedState {
-  void StartANewSearch(size_t socket_id, int task_workers, int search_workers);
+  void StartANewSearch(int task_workers, int search_workers);
 
   std::vector<TaskWorkspace> task_workspaces_;
   TaskQueue task_queue_;

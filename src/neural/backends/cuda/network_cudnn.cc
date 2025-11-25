@@ -723,8 +723,11 @@ class CudnnNetwork : public Network {
   void GraphLaunch(InputsOutputs<DataType>* io, int batchSize) {
     UploadInputs(io, batchSize);
 
+    // cudaGraphUpload was added in CUDA 11.1
+#if CUDART_VERSION >= 11010
     // Make sure graph has completed upload before launching it.
     ReportCUDAErrors(cudaStreamSynchronize(io->exec_stream_));
+#endif
 
     io->cuda_graphs_[batchSize - 1].Launch(compute_stream_);
     ReportCUDAErrors(
@@ -750,21 +753,12 @@ class CudnnNetwork : public Network {
     const uint64_t* ipDataMasks = io->input_masks_mem_gpu_;
     const auto* ipDataValues = io->input_val_mem_gpu_;
 
-    constexpr bool fp16 = std::is_same<half, DataType>::value;
-    if constexpr (fp16) {
-      if (nhwc_)
-        expandPlanes_Fp16_NHWC((half*)(tensor_mem_[0]), ipDataMasks,
-                               ipDataValues, batchSize * kInputPlanes,
-                               compute_stream);
-      else
-        expandPlanes_Fp16_NCHW((half*)(tensor_mem_[0]), ipDataMasks,
-                               ipDataValues, batchSize * kInputPlanes,
-                               compute_stream);
-    } else {
-      expandPlanes_Fp32_NCHW((float*)(tensor_mem_[0]), ipDataMasks,
-                             ipDataValues, batchSize * kInputPlanes,
-                             compute_stream);
-    }
+    if (nhwc_)
+      expandPlanes_NHWC(tensor_mem_[0], ipDataMasks, ipDataValues,
+                        batchSize * kInputPlanes, compute_stream);
+    else
+      expandPlanes_NCHW(tensor_mem_[0], ipDataMasks, ipDataValues,
+                        batchSize * kInputPlanes, compute_stream);
 
     // debug code example
     // dumpTensor(tensor_mem_[0], 1024, "After expand Planes", fp16);
@@ -933,7 +927,7 @@ class CudnnNetwork : public Network {
         float sum = w + d + l;
         w /= sum;
         l /= sum;
-        d = 1.0f - w - l;
+        d /= sum;
         wdl[2 * i + 0] = w - l;
         wdl[2 * i + 1] = d;
       }
