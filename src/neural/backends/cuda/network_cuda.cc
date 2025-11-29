@@ -134,6 +134,7 @@ class CudaNetworkComputation : public NetworkComputation {
   ~CudaNetworkComputation();
 
   void AddInput(InputPlanes&& input) override {
+    LCTRACE_FUNCTION_SCOPE;
     const auto iter_mask =
         &inputs_outputs_->input_masks_mem_[batch_size_ * kInputPlanes];
     const auto iter_val =
@@ -206,6 +207,7 @@ class CudaNetwork : public Network {
       : capabilities_{file.format().network_format().input(),
                       file.format().network_format().output(),
                       file.format().network_format().moves_left()} {
+    LCTRACE_FUNCTION_SCOPE;
     MultiHeadWeights weights(file.weights());
     gpu_id_ = options.GetOrDefault<int>("gpu", 0);
     enable_graph_capture_ = options.GetOrDefault<bool>("graph_capture", true);
@@ -1044,6 +1046,7 @@ class CudaNetwork : public Network {
   int GetThreads() const override { return 1 + multi_stream_; }
 
   std::unique_ptr<NetworkComputation> NewComputation() override {
+    LCTRACE_FUNCTION_SCOPE;
     // Set correct gpu id for this computation (as it might have been called
     // from a different thread).
     ReportCUDAErrors(cudaSetDevice(gpu_id_));
@@ -1052,6 +1055,7 @@ class CudaNetwork : public Network {
   }
 
   std::unique_ptr<InputsOutputs<DataType>> GetInputsOutputs() {
+    LCTRACE_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     if (free_inputs_outputs_.empty()) {
       return std::make_unique<InputsOutputs<DataType>>(
@@ -1066,6 +1070,7 @@ class CudaNetwork : public Network {
   }
 
   void ReleaseInputsOutputs(std::unique_ptr<InputsOutputs<DataType>> resource) {
+    LCTRACE_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     free_inputs_outputs_.push_back(std::move(resource));
   }

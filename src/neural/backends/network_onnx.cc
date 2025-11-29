@@ -139,7 +139,8 @@ class OnnxComputation final : public NetworkComputation {
   int GetBatchSize() const override;
   void ComputeBlocking() override;
   void ComputeBlockingImpl();
-  void CaptureCudaGraph(std::unique_lock<std::mutex>&& lock = std::unique_lock<std::mutex>());
+  void CaptureCudaGraph(
+      std::unique_lock<std::mutex>&& lock = std::unique_lock<std::mutex>());
   float GetQVal(int sample) const override;
   float GetDVal(int sample) const override;
   float GetPVal(int sample, int move_id) const override;
@@ -164,6 +165,7 @@ class OnnxNetwork final : public Network {
               OnnxProvider provider, bool cpu_wdl);
   ~OnnxNetwork();
   std::unique_ptr<NetworkComputation> NewComputation() override {
+    LCTRACE_FUNCTION_SCOPE;
 #if CUDART_VERSION
     if (provider_ == OnnxProvider::CUDA || provider_ == OnnxProvider::TRT) {
       ReportCUDAErrors(cudaSetDevice(gpu_));
@@ -193,6 +195,7 @@ class OnnxNetwork final : public Network {
                                  int attempt);
 
   std::unique_ptr<InputsOutputs> GetInputsOutputs() {
+    LCTRACE_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     if (free_inputs_outputs_.empty()) {
       return std::make_unique<InputsOutputs>(this);
@@ -205,6 +208,7 @@ class OnnxNetwork final : public Network {
   }
 
   void ReleaseInputsOutputs(std::unique_ptr<InputsOutputs> resource) {
+    LCTRACE_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     free_inputs_outputs_.push_back(std::move(resource));
   }
@@ -372,6 +376,7 @@ void AsDataType(float x, Ort::BFloat16_t* y) {
 
 template <typename DataType>
 void OnnxComputation<DataType>::AddInput(InputPlanes&& input) {
+  LCTRACE_FUNCTION_SCOPE;
 #if CUDART_VERSION
   if (network_->provider_ == OnnxProvider::CUDA ||
       network_->provider_ == OnnxProvider::TRT) {
@@ -512,7 +517,8 @@ Ort::IoBinding OnnxComputation<DataType>::PrepareInputs(int start,
 }
 
 template <typename DataType>
-void OnnxComputation<DataType>::CaptureCudaGraph(std::unique_lock<std::mutex>&& lock) {
+void OnnxComputation<DataType>::CaptureCudaGraph(
+    std::unique_lock<std::mutex>&& lock) {
   cudaGraph_t graph = nullptr;
 
   ReportCUDAErrors(cudaStreamBeginCapture(network_->upload_stream_,
@@ -941,6 +947,7 @@ OnnxNetwork::OnnxNetwork(const WeightsFile& file, const OptionsDict& opts,
       bf16_(file.onnx_model().data_type() == pblczero::OnnxModel::BFLOAT16),
       cpu_wdl_(cpu_wdl),
       provider_(provider) {
+  LCTRACE_FUNCTION_SCOPE;
   onnx_env_.DisableTelemetryEvents();
 
   gpu_ = opts.GetOrDefault<int>("gpu", 0);
