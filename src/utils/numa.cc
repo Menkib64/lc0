@@ -264,9 +264,9 @@ struct Config {
     do {
       DWORD min_size = FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) +
                        sizeof(te.th32OwnerProcessID);
-      if (te.dwSize >= min_size ||
-          te.th32OwnerProcessID != GetCurrentProcessId() ||
-          te.th32ThreadID == 0) {
+      if (te.dwSize >= min_size &&
+          te.th32OwnerProcessID == GetCurrentProcessId() &&
+          te.th32ThreadID != 0) {
         HANDLE thread =
             OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE,
                        te.th32ThreadID);
