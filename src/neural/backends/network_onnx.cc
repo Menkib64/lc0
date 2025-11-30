@@ -168,7 +168,11 @@ class OnnxNetwork final : public Network {
     LCTRACE_FUNCTION_SCOPE;
 #if CUDART_VERSION
     if (provider_ == OnnxProvider::CUDA || provider_ == OnnxProvider::TRT) {
-      ReportCUDAErrors(cudaSetDevice(gpu_));
+      int device = -1;
+      ReportCUDAErrors(cudaGetDevice(&device));
+      if (device != gpu_) {
+        ReportCUDAErrors(cudaSetDevice(gpu_));
+      }
     }
 #endif
     if (fp16_) {
