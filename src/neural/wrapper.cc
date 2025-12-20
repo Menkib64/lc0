@@ -130,6 +130,7 @@ class NetworkAsBackendComputation : public BackendComputation {
       if (result.m) *result.m = computation_->GetMVal(i);
       if (!result.p.empty()) SoftmaxPolicy(result.p, computation_.get(), i);
     }
+    computation_.reset();
   }
 
   void SoftmaxPolicy(std::span<float> dst,
