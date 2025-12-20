@@ -242,7 +242,7 @@ struct InputsOutputs {
 
 template <typename DataType>
 struct CudaGraphCapture {
-  static constexpr int kMinimumFreeMemory = 100 * 1024 * 1024;
+  static constexpr int kMinimumFreeMemory = 500 * 1024 * 1024;
 
   CudaGraphCapture(InputsOutputs<DataType>& io, cudaStream_t upload_stream,
                    cudaStream_t download_stream)
