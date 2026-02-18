@@ -75,7 +75,7 @@ class SyzygyTablebase {
   // Thread safe.
   // Result is only strictly valid for positions with 0 ply 50 move counter.
   // Probe state will return FAIL if the position is not in the tablebase.
-  WDLScore probe_wdl(const Position& pos, ProbeState* result);
+  WDLScore probe_wdl(const Position& pos, ProbeState* result, uint64_t disable_key = 0);
   // Probes DTZ tables for the given position to determine the number of ply
   // before a zeroing move under optimal play.
   // Thread safe.
@@ -90,7 +90,7 @@ class SyzygyTablebase {
   // Returns false if the position is not in the tablebase.
   // Safe moves are added to the safe_moves output paramater.
   bool root_probe(const Position& pos, bool has_repeated, bool win_only,
-                  std::vector<Move>* safe_moves);
+                  std::vector<Move>* safe_moves, uint64_t& disable_key);
   // Probes WDL tables to determine which moves might be on the optimal play
   // path. If 50 move ply counter is non-zero some (or maybe even all) of the
   // returned safe moves in a 'winning' position, may actually be draws.
@@ -100,7 +100,7 @@ class SyzygyTablebase {
 
  private:
   template <bool CheckZeroingMoves = false>
-  WDLScore search(const Position& pos, ProbeState* result);
+  WDLScore search(const Position& pos, ProbeState* result, uint64_t disable_key = 0);
 
   std::string paths_;
   // Caches the max_cardinality from the impl, as max_cardinality may be a hot
