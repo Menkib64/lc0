@@ -34,6 +34,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -1843,7 +1844,8 @@ void SearchWorker::PickNodesToExtendTask(
         multiplier = std::clamp(multiplier, 1.0f, 4.0f);
       }
       const int opponent_node_limit =
-          static_cast<int>(params_.GetScLimit() * multiplier);
+          std::min(static_cast<int64_t>(params_.GetScLimit() * multiplier),
+                   (int64_t)std::numeric_limits<int>::max());
       int current_node_count = node->GetN();
       bool node_limit_frozen = node->GetNodeLimitFrozen();
 
