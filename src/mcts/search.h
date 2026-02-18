@@ -167,6 +167,7 @@ class Search {
   Node* root_node_;
   NNCache* cache_;
   SyzygyTablebase* syzygy_tb_;
+  uint64_t syzygy_disable_key_;
   // Fixed positions which happened before the search.
   const PositionHistory& played_history_;
 
