@@ -206,9 +206,7 @@ class Node {
   void MakeNotTerminal();
 
   void SetNodeLimitFrozen(bool value);
-  void SetNodeLimitFrozenLock(bool value);
   bool GetNodeLimitFrozen();
-  bool GetNodeLimitFrozenLock();
   uint8_t GetVisitedNumberOfEdges();
   void SetVisitedNumberOfEdges(int value);
 
@@ -348,8 +346,7 @@ class Node {
   GameResult upper_bound_ : 2;
   // Whether the child_ is actually an array of equal length to edges.
   bool solid_children_ : 1;
-  bool node_limit_frozen_ = false;
-  bool node_limit_frozen_lock_ = false;
+  bool node_limit_frozen_ : 1 = false;
 
   // TODO(mooskagh) Unfriend NodeTree.
   friend class NodeTree;

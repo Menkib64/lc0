@@ -335,16 +335,8 @@ void Node::SetNodeLimitFrozen(bool value) {
      node_limit_frozen_ = value;
 }
 
-void Node::SetNodeLimitFrozenLock(bool value) {
-     node_limit_frozen_lock_ = value;
-}
-
 bool Node::GetNodeLimitFrozen() {
      return node_limit_frozen_;
-}
-
-bool Node::GetNodeLimitFrozenLock() {
-     return node_limit_frozen_lock_;
 }
 
 uint8_t Node::GetVisitedNumberOfEdges() {
