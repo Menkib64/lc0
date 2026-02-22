@@ -579,8 +579,8 @@ void BaseSearchParams::Populate(OptionsParser* options) {
   options->Add<ChoiceOption>(kFpuStrategyAtRootId, fpu_strategy) = "same";
   options->Add<FloatOption>(kFpuValueAtRootId, -100.0f, 100.0f) = 1.0f;
   options->Add<IntOption>(kCacheHistoryLengthId, 0, 7) = 0;
-  options->Add<FloatOption>(kPolicyDecayExponentId, 0.0f, 10.0f) = 0.5f;
-  options->Add<FloatOption>(kPolicyDecayFactorId, 0.0f, 1.0f) = 0.0001f;
+  options->Add<FloatOption>(kPolicyDecayExponentId, 0.0f, 100.0f) = 0.5f;
+  options->Add<FloatOption>(kPolicyDecayFactorId, 0.0f, 10.0f) = 0.0001f;
   options->Add<IntOption>(kMaxCollisionEventsId, 1, 65536) = 917;
   options->Add<IntOption>(kMaxCollisionVisitsId, 1, 100000000) = 80000;
   options->Add<IntOption>(kMaxCollisionVisitsScalingStartId, 1, 100000) = 28;
