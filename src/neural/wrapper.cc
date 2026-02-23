@@ -34,6 +34,7 @@
 #include "neural/shared_params.h"
 #include "utils/atomic_vector.h"
 #include "utils/fastmath.h"
+#include "utils/trace.h"
 
 namespace lczero {
 
@@ -94,7 +95,7 @@ class NetworkAsBackend : public Backend {
   }
 
   BackendAttributes GetAttributes() const override { return attrs_; }
-  std::unique_ptr<BackendComputation> CreateComputation() override;
+  std::unique_ptr<BackendComputation> CreateComputation(size_t time_remaining) override;
   UpdateConfigurationResult UpdateConfiguration(
       const OptionsDict& options) override {
     Backend::UpdateConfiguration(options);
@@ -151,6 +152,7 @@ class NetworkAsBackendComputation : public BackendComputation {
     for (auto& entry : entries_) computation_->AddInput(std::move(entry.input));
     computation_->ComputeBlocking();
     callback(ComputationEvent::FIRST_BACKEND_IDLE);
+    LCTRACE_FUNCTION_SCOPE;
     for (size_t i = 0; i < entries_.size(); ++i) {
       entries_[i].ProcessResult(*computation_, i,
                                backend_->softmax_policy_temperature_);
@@ -163,7 +165,7 @@ class NetworkAsBackendComputation : public BackendComputation {
   AtomicVector<NetworkComputationRequest> entries_;
 };
 
-std::unique_ptr<BackendComputation> NetworkAsBackend::CreateComputation() {
+std::unique_ptr<BackendComputation> NetworkAsBackend::CreateComputation(size_t) {
   return std::make_unique<NetworkAsBackendComputation>(this);
 }
 
@@ -175,18 +177,17 @@ NetworkAsBackendFactory::NetworkAsBackendFactory(const std::string& name,
     : name_(name), factory_(factory), priority_(priority) {}
 
 std::unique_ptr<Backend> NetworkAsBackendFactory::Create(
-    const OptionsDict& options) {
+    const OptionsDict& options, const std::string& net_path) {
   const std::string backend_options =
       options.Get<std::string>(SharedBackendParams::kBackendOptionsId);
   OptionsDict network_options;
   network_options.AddSubdictFromString(backend_options);
 
-  std::string net_path =
-      options.Get<std::string>(SharedBackendParams::kWeightsId);
   std::optional<WeightsFile> weights = LoadWeights(net_path);
   std::unique_ptr<Network> network =
       factory_(std::move(weights), network_options);
   network_options.CheckAllOptionsRead(name_);
   return std::make_unique<NetworkAsBackend>(std::move(network), options);
 }
+
 }  // namespace lczero

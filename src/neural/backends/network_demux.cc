@@ -157,7 +157,7 @@ class DemuxingBackend final : public Backend {
     backends_[index].Assign(std::move(network), opts, abort_);
   }
 
-  std::unique_ptr<BackendComputation> CreateComputation() override;
+  std::unique_ptr<BackendComputation> CreateComputation(size_t time_left) override;
 
   BackendAttributes GetAttributes() const override { return attrs_; }
 
@@ -277,7 +277,7 @@ void DemuxingComputation::ProcessResults(const DemuxingWork& work) {
   }
 }
 
-std::unique_ptr<BackendComputation> DemuxingBackend::CreateComputation() {
+std::unique_ptr<BackendComputation> DemuxingBackend::CreateComputation(size_t) {
   return std::make_unique<DemuxingComputation>(this);
 }
 
@@ -391,14 +391,12 @@ void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
 }
 
 class DemuxingBackendFactory : public BackendFactory {
-  std::unique_ptr<Backend> Create(const OptionsDict& options) override {
+  std::unique_ptr<Backend> Create(const OptionsDict& options, const std::string& net_path) override {
     const std::string backend_options_string =
         options.Get<std::string>(SharedBackendParams::kBackendOptionsId);
     OptionsDict backend_options;
     backend_options.AddSubdictFromString(backend_options_string);
 
-    std::string net_path =
-        options.Get<std::string>(SharedBackendParams::kWeightsId);
     std::optional<WeightsFile> weights = LoadWeights(net_path);
     return std::make_unique<DemuxingBackend>(weights, options, backend_options);
   }
