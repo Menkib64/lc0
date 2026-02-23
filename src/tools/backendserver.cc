@@ -249,19 +249,13 @@ class BackendHandler {
     unsigned queued_batches = computations_in_flight_--;
     queued_batches += queued_computations_;
 
-    // Update NPS estimation.
-    TimePoint old = last_complete_time_;
-    last_complete_time_ = now;
     gpu_work_size_ -= size;
-    // Avoid division by zero.
+    // Avoid wrong timing if a thread picked nothing to process.
     if (size == 0) return {queued_batches, now};
-    // The first batch doesn't know when it started.
-    if (old == TimePoint()) {
-      return {queued_batches, now};
-    }
-    auto seconds = std::chrono::duration<double>(now - old).count();
-    auto nps = size / seconds;
+    // Update NPS estimation.
+    auto nps = PushToBatchHistory(size, now);
     if (nps > max_nps_) {
+      LOGFILE << "New max NPS observed: " << nps << " (previous: " << max_nps_ << ")";
       max_nps_ = nps;
     }
     TimePoint timer =
@@ -269,6 +263,26 @@ class BackendHandler {
                   std::chrono::duration<double>{kGpuIdleBufferMultiplier *
                                                 gpu_work_size_ / max_nps_});
     return {queued_batches, timer};
+  }
+
+  double PushToBatchHistory(size_t size, TimePoint now) {
+    auto first_empty = std::find(batch_history_.begin(), batch_history_.end(),
+                                BatchHistory{});
+    if (first_empty == batch_history_.end()) {
+      std::copy(batch_history_.begin() + 1, batch_history_.end(), batch_history_.begin());
+      first_empty = batch_history_.end() - 1;
+    }
+    *first_empty = {now, size};
+    if (first_empty == batch_history_.begin()) {
+      // Not enough data to estimate NPS.
+      return 0.0;
+    }
+    double total_time = std::chrono::duration<double>(now - batch_history_.front().end_time_).count();
+    size_t nodes = std::accumulate(batch_history_.begin() + 1, batch_history_.end(), 0UL,
+                               [](size_t sum, const BatchHistory& item) {
+                                 return sum + item.size_;
+                               });
+    return nodes / total_time;
   }
 
   // Get number of pending positions in the queue.
@@ -292,7 +306,7 @@ class BackendHandler {
 
   // Get and reset statistics.
   Statistics GetStatistics() {
-    Statistics stats;
+    Statistics stats{};
     SpinMutex::Lock lock(mutex_);
     std::swap(stats, statistics_);
     stats.queue_positions_ = queue_size_;
@@ -329,8 +343,14 @@ class BackendHandler {
   // FIFO queue of computation requests.
   std::queue<ComputationRequest> queue_;
 
-  // The time when the last batch completed.
-  TimePoint last_complete_time_;
+  struct BatchHistory {
+    TimePoint end_time_ = TimePoint();
+    size_t size_ = 0;
+
+    bool operator==(const BatchHistory& other) const = default;
+  };
+
+  std::array<BatchHistory, 5> batch_history_;
 
   // Maximum observed NPS for this backend.
   double max_nps_ = 0.0;
