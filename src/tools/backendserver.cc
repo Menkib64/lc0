@@ -523,8 +523,9 @@ class SharedQueue {
   void NewConnection() {
     SpinMutex::Lock lock(mutex_);
     active_connections_++;
-    if (active_connections_ == 1) {
-      StatisticsTimerSetup(Clock::now());
+    auto now = Clock::now();
+    if (active_connections_ == 1 && statistics_timer_.expiry() < now) {
+      StatisticsTimerSetup(now);
     }
   }
 
