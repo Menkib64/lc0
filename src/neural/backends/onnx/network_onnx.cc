@@ -536,6 +536,7 @@ void OnnxComputation<DataType>::ComputeBlocking() {
     {
       LOGFILE << "ComputeBlocking: Taking lock for " << inputs_outputs_;
       std::unique_lock lock(network_->lock_);
+      LOGFILE << "ComputeBlocking: Checking for graph for " << inputs_outputs_ << " batch size " << GetBatchSize();
       cudaGraphExec_t& graph =
           inputs_outputs_->cuda_graphs_[GetBatchSize() - 1];
       if (!graph) {
