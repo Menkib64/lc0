@@ -20,10 +20,12 @@ for:
   matrix:
     only:
     - NAME: gpu-nvidia-cudnn
+    - NAME: gpu-nvidia-cuda12
     - NAME: gpu-nvidia-cuda11
 #    - NAME: gpu-opencl
     - NAME: cpu-dnnl
     - NAME: cpu-openblas
+    - NAME: android
   skip_non_tags: true
 clone_folder: c:\projects\lc0
 install:
