@@ -549,25 +549,32 @@ void OnnxComputation<DataType>::ComputeBlocking() {
     assert(GetBatchSize() > 0);
     bool new_capture = false;
     {
+      LOGFILE << "ComputeBlocking: Taking lock for " << inputs_outputs_;
       std::unique_lock lock(network_->lock_);
+      LOGFILE << "ComputeBlocking: Checking for graph for " << inputs_outputs_ << " batch size " << GetBatchSize();
       cudaGraphExec_t& graph =
           inputs_outputs_->cuda_graphs_[GetBatchSize() - 1];
       if (!graph) {
+        LOGFILE << "ComputeBlocking: No graph for " << inputs_outputs_ << ", capturing.";
         ComputeBlockingImpl();
         ReportCUDAErrors(cudaEventRecord(
             inputs_outputs_->outputs_download_before_capture_event_,
             network_->download_stream_));
 
+        LOGFILE << "ComputeBlocking: Capturing CUDA graph for " << inputs_outputs_;
         CaptureCudaGraph(std::move(lock));
         new_capture = true;
       } else {
+        LOGFILE << "ComputeBlocking: Launching graph for " << inputs_outputs_;
         ReportCUDAErrors(cudaGraphLaunch(graph, inputs_outputs_->exec_stream_));
       }
     }
     if (new_capture) {
+      LOGFILE << "ComputeBlocking: Watiing for network evaluation: " << inputs_outputs_;
       ReportCUDAErrors(cudaEventSynchronize(
           inputs_outputs_->outputs_download_before_capture_event_));
     } else {
+      LOGFILE << "ComputeBlocking: Waiting for graph execution for " << inputs_outputs_;
       ReportCUDAErrors(cudaStreamSynchronize(inputs_outputs_->exec_stream_));
     }
   } else
@@ -590,6 +597,7 @@ void OnnxComputation<DataType>::ComputeBlocking() {
     }
 #endif
   }
+  LOGFILE << "ComputeBlocking: Processing WDL head output for " << inputs_outputs_;
   if (network_->wdl_head_ != -1) {
     const DataType* data = static_cast<DataType*>(
         inputs_outputs_->output_tensors_data_[network_->wdl_head_]);
@@ -613,6 +621,7 @@ void OnnxComputation<DataType>::ComputeBlocking() {
       inputs_outputs_->wdl_output_data_[3 * i + 2] = l;
     }
   }
+  LOGFILE << "ComputeBlocking: Done processing WDL head output for " << inputs_outputs_;
 }
 
 template <typename DataType>
