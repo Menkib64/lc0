@@ -15,12 +15,12 @@ environment:
   - NAME: onnx
   - NAME: android
   - NAME: gpu-nvidia-cuda11
+  - NAME: gpu-nvidia-cuda10
 for:
 -
   matrix:
     only:
     - NAME: gpu-nvidia-cudnn
-    - NAME: gpu-nvidia-cuda11
 #    - NAME: gpu-opencl
     - NAME: cpu-dnnl
     - NAME: cpu-openblas

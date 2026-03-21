@@ -473,6 +473,17 @@ if get_option('build_backends')
     nvcc_arguments = ['-c', '@INPUT@', '-o', '@OUTPUT@',
                       '-I', meson.current_source_dir() + '/src']
     nvcc_help = run_command(nvcc, '-h', check : false).stdout()
+    nvcc_stdversion = 14
+    if nvcc_help.contains('c++20')
+      nvcc_arguments += ['--std=c++20']
+      nvcc_stdversion = 20
+    elif nvcc_help.contains('c++17')
+      nvcc_arguments += ['--std=c++17']
+      nvcc_stdversion = 17
+    else
+      nvcc_arguments += ['--std=c++14']
+    endif
+    message('NVCC detected with C++ standard: ' + nvcc_stdversion.to_string())
     if host_machine.system() == 'windows'
       if get_option('b_vscrt') == 'mt'
         nvcc_arguments += ['-Xcompiler', '-MT']
@@ -483,9 +494,8 @@ if get_option('build_backends')
       elif get_option('b_vscrt') != 'none'
         nvcc_arguments += ['-Xcompiler', '-MD']
       endif
-      nvcc_arguments += ['--std=c++17']
     else
-      nvcc_arguments += ['--std=c++17', '-Xcompiler', '-fPIC']
+      nvcc_arguments += ['-Xcompiler', '-fPIC']
       if get_option('debug')
         nvcc_arguments += ['-g']
       endif
@@ -562,6 +572,7 @@ if get_option('build_backends')
 	 files += cuda_files
 
     if get_option('cutlass') and max_cuda >= 800
+      message('Building with CUTLASS support')
       add_project_arguments('-DUSE_CUTLASS', language : 'cpp')
       nvcc_arguments += ['-DUSE_CUTLASS']
       if get_option('cutlass_include') != ''
