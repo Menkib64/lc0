@@ -526,8 +526,11 @@ if get_option('build_backends')
     nvcc_ok = true
 
     max_cuda = 0
-    nvcc_dryrun = run_command(nvcc, '--dryrun', nvcc_extra_args, 'foo.cu', check : false).stderr()
-    foreach x : nvcc_dryrun.split()
+    nvcc_dryrun = run_command(nvcc, '--dryrun', nvcc_extra_args, 'foo.cu', check : false)
+    message('nvcc output: ' + nvcc_dryrun.stdout())
+    message('nvcc stderr: ' + nvcc_dryrun.stderr())
+    message('nvcc return code: ' + nvcc_dryrun.returncode().to_string())
+    foreach x : nvcc_dryrun.stderr().split()
       message('NVCC dry run output: ' + x)
       if x.contains('__CUDA_ARCH__=')
         arch = x.split('=')[1].to_int()
