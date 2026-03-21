@@ -474,16 +474,7 @@ if get_option('build_backends')
                       '-I', meson.current_source_dir() + '/src']
     nvcc_help = run_command(nvcc, '-h', check : false).stdout()
     nvcc_stdversion = 14
-    support_cpp20 = true
-    # NVCC requires MSVC 1930 or newer for c++20 support.
-    if cc.get_id() == 'msvc'
-      version = cc.version().split('.')
-      version_int = version[0].to_int() * 100 + version[1].to_int()
-      if version_int < 1930
-        support_cpp20 = false
-      endif
-    endif
-    if nvcc_help.contains('c++20') and support_cpp20
+    if nvcc_help.contains('c++20')
       nvcc_arguments += ['--std=c++20']
       nvcc_stdversion = 20
     elif nvcc_help.contains('c++17')
@@ -546,7 +537,14 @@ if get_option('build_backends')
     nvcc_ok = true
 
     max_cuda = 0
-    nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, 'foo.cu', check : false)
+    nvcc_args = []
+    foreach a : nvcc_arguments
+      if a in ['-c', '@INPUT@', '-o', '@OUTPUT@']
+      else
+        nvcc_args += a
+      endif
+    endforeach
+    nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
     if host_machine.system() == 'windows'
       nvcc_dryrun = nvcc_status.stdout()
     else
