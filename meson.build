@@ -476,7 +476,7 @@ if get_option('build_backends')
     nvcc_stdversion = 14
     support_cpp20 = true
     # NVCC requires MSVC 1930 or newer for c++20 support.
-    if cc.get_id() != 'msvc'
+    if cc.get_id() == 'msvc'
       version = cc.version().split('.')
       version_int = version[0].to_int() * 100 + version[1].to_int()
       if version_int < 1930
