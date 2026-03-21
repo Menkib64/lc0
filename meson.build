@@ -473,17 +473,6 @@ if get_option('build_backends')
     nvcc_arguments = ['-c', '@INPUT@', '-o', '@OUTPUT@',
                       '-I', meson.current_source_dir() + '/src']
     nvcc_help = run_command(nvcc, '-h', check : false).stdout()
-    nvcc_stdversion = 14
-    if nvcc_help.contains('c++20')
-      nvcc_arguments += ['--std=c++20']
-      nvcc_stdversion = 20
-    elif nvcc_help.contains('c++17')
-      nvcc_arguments += ['--std=c++17']
-      nvcc_stdversion = 17
-    else
-      nvcc_arguments += ['--std=c++14']
-    endif
-    message('NVCC detected with C++ standard: ' + nvcc_stdversion.to_string())
     if host_machine.system() == 'windows'
       if get_option('b_vscrt') == 'mt'
         nvcc_arguments += ['-Xcompiler', '-MT']
@@ -541,9 +530,25 @@ if get_option('build_backends')
     foreach a : nvcc_arguments
       if a in ['-c', '@INPUT@', '-o', '@OUTPUT@']
       else
-        nvcc_args += a
+        nvcc_args += [a]
       endif
     endforeach
+    nvcc_stdversion = [20, 17, 14]
+    foreach v : nvcc_stdversion
+      nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
+      if host_machine.system() == 'windows'
+        nvcc_dryrun = nvcc_status.stdout()
+      else
+        nvcc_dryrun = nvcc_status.stderr()
+      endif
+      if not nvcc_dryrun.contains('flag is not supported with the configured host compiler')
+        nvcc_arguments += ['-std=c++' + v.to_string()]
+        nvcc_args += ['-std=c++' + v.to_string()]
+        nvcc_stdversion = v
+        break
+      endif
+    endforeach
+    message('NVCC detected with C++ standard: ' + nvcc_stdversion.to_string())
     nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
     if host_machine.system() == 'windows'
       nvcc_dryrun = nvcc_status.stdout()
@@ -578,7 +583,7 @@ if get_option('build_backends')
     includes += include_directories('src/neural/backends/cuda/')
 	 files += cuda_files
 
-    if get_option('cutlass') and max_cuda >= 800
+    if get_option('cutlass') and max_cuda >= 800 and nvcc_stdversion >= 17
       message('Building with CUTLASS support')
       add_project_arguments('-DUSE_CUTLASS', language : 'cpp')
       nvcc_arguments += ['-DUSE_CUTLASS']
