@@ -483,6 +483,7 @@ if get_option('build_backends')
       elif get_option('b_vscrt') != 'none'
         nvcc_arguments += ['-Xcompiler', '-MD']
       endif
+      nvcc_arguments += ['--std=c++17']
     else
       nvcc_arguments += ['--std=c++17', '-Xcompiler', '-fPIC']
       if get_option('debug')
@@ -532,8 +533,8 @@ if get_option('build_backends')
     else
       nvcc_dryrun = nvcc_status.stderr()
     endif
+    message('NVCC dry run output: ' + nvcc_dryrun)
     foreach x : nvcc_dryrun.split()
-      message('NVCC dry run output: ' + x)
       if x.contains('__CUDA_ARCH__=')
         arch = x.split('=')[1].to_int()
         if arch > max_cuda
