@@ -531,6 +531,7 @@ if get_option('build_backends')
       nvcc_dryrun = nvcc_status.stdout()
     else
       nvcc_dryrun = nvcc_status.stderr()
+    endif
     foreach x : nvcc_dryrun.split()
       message('NVCC dry run output: ' + x)
       if x.contains('__CUDA_ARCH__=')
