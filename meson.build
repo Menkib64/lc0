@@ -542,7 +542,8 @@ if get_option('build_backends')
       else
         nvcc_dryrun = nvcc_status.stderr()
       endif
-      if nvcc_dryrun.contains('flag is not supported with the configured host compiler')
+      if nvcc_status.returncode() != 0 or
+        nvcc_dryrun.contains('flag is not supported with the configured host compiler')
         continue
       endif
       nvcc_arguments += [s]
