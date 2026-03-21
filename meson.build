@@ -542,8 +542,6 @@ if get_option('build_backends')
       else
         nvcc_dryrun = nvcc_status.stderr()
       endif
-      message('NVCC dry run output for ' + s + ': ' + nvcc_dryrun)
-      message('Checking if NVCC supports ' + s + ': ' + nvcc_status.stderr())
       if nvcc_dryrun.contains('flag is not supported with the configured host compiler')
         continue
       endif
@@ -559,7 +557,6 @@ if get_option('build_backends')
     else
       nvcc_dryrun = nvcc_status.stderr()
     endif
-    message('NVCC dry run output: ' + nvcc_dryrun)
     foreach x : nvcc_dryrun.split()
       if x.contains('__CUDA_ARCH__=')
         arch = x.split('=')[1].to_int()
@@ -569,9 +566,6 @@ if get_option('build_backends')
       endif
     endforeach
     message('Detected maximum CUDA architecture: ' + max_cuda.to_string())
-    if (max_cuda < 350)
-      error('CUDA compute capability 3.5 or higher is required.')
-    endif
   endif
   if (get_option('cudnn') or get_option('plain_cuda')) and cu_dart.found() and cu_blas.found() and nvcc_ok
     deps += [cu_blas, cu_dart]
