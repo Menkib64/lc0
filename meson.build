@@ -535,18 +535,22 @@ if get_option('build_backends')
     endforeach
     nvcc_stdversion = [20, 17, 14]
     foreach v : nvcc_stdversion
-      nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
+      s = '--std=c++' + v.to_string()
+      nvcc_status = run_command(nvcc, '--dryrun', s, nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
       if host_machine.system() == 'windows'
         nvcc_dryrun = nvcc_status.stdout()
       else
         nvcc_dryrun = nvcc_status.stderr()
       endif
-      if not nvcc_dryrun.contains('flag is not supported with the configured host compiler')
-        nvcc_arguments += ['-std=c++' + v.to_string()]
-        nvcc_args += ['-std=c++' + v.to_string()]
-        nvcc_stdversion = v
-        break
+      message('NVCC dry run output for ' + s + ': ' + nvcc_dryrun)
+      message('Checking if NVCC supports ' + s + ': ' + nvcc_status.stderr())
+      if nvcc_dryrun.contains('flag is not supported with the configured host compiler')
+        continue
       endif
+      nvcc_arguments += [s]
+      nvcc_args += [s]
+      nvcc_stdversion = v
+      break
     endforeach
     message('NVCC detected with C++ standard: ' + nvcc_stdversion.to_string())
     nvcc_status = run_command(nvcc, '--dryrun', nvcc_extra_args, nvcc_args, 'foo.cu', check : false)
