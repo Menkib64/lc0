@@ -528,6 +528,7 @@ if get_option('build_backends')
     max_cuda = 0
     nvcc_dryrun = run_command(nvcc, '--dryrun', nvcc_extra_args, 'foo.cu', check : false).stderr()
     foreach x : nvcc_dryrun.split()
+      message('NVCC dry run output: ' + x)
       if x.contains('__CUDA_ARCH__=')
         arch = x.split('=')[1].to_int()
         if arch > max_cuda
@@ -536,6 +537,9 @@ if get_option('build_backends')
       endif
     endforeach
     message('Detected maximum CUDA architecture: ' + max_cuda.to_string())
+    if (max_cuda < 350)
+      error('CUDA compute capability 3.5 or higher is required.')
+    endif
   endif
   if (get_option('cudnn') or get_option('plain_cuda')) and cu_dart.found() and cu_blas.found() and nvcc_ok
     deps += [cu_blas, cu_dart]
