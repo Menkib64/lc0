@@ -1373,7 +1373,8 @@ void SearchWorker::GatherMinibatch() {
   // TODO: GetEstimatedRemainingPlayouts has already had smart pruning factor
   // applied, which doesn't clearly make sense to include here...
   int64_t remaining_n =
-      latest_time_manager_hints_.GetEstimatedRemainingPlayouts();
+      latest_time_manager_hints_.GetEstimatedRemainingPlayouts() *
+      latest_time_manager_hints_.GetPruningFactor();
   int collisions_left = CalculateCollisionsLeft(
       std::min(static_cast<int64_t>(cur_n), remaining_n), params_);
 

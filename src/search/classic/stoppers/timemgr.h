@@ -74,11 +74,14 @@ class StoppersHints {
   void UpdateEstimatedRemainingPlayouts(int64_t v);
   int64_t GetEstimatedRemainingPlayouts() const;
   void UpdateEstimatedNps(float v);
+  double GetPruningFactor() const;
+  void UpdatePruningFactor(double v);
   std::optional<float> GetEstimatedNps() const;
 
  private:
   int64_t remaining_time_ms_;
   int64_t remaining_playouts_;
+  double pruning_factor_;
   std::optional<float> estimated_nps_;
 };
 

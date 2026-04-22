@@ -238,6 +238,7 @@ bool SmartPruningStopper::ShouldStop(const IterationStats& stats,
   // May overflow if (nps/smart_pruning_factor) > 180 000 000, but that's not
   // very realistic.
   hints->UpdateEstimatedRemainingPlayouts(remaining_playouts);
+  hints->UpdatePruningFactor(smart_pruning_factor_);
   if (stats.batches_since_movestart < minimum_batches_) return false;
 
   uint32_t largest_n = 0;

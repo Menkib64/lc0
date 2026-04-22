@@ -49,6 +49,13 @@ int64_t StoppersHints::GetEstimatedRemainingPlayouts() const {
   return std::max(decltype(remaining_playouts_){1}, remaining_playouts_);
 }
 
+void StoppersHints::UpdatePruningFactor(double v) {
+  pruning_factor_ = v;
+}
+double StoppersHints::GetPruningFactor() const {
+  return pruning_factor_;
+}
+
 void StoppersHints::UpdateEstimatedNps(float v) { estimated_nps_ = v; }
 
 std::optional<float> StoppersHints::GetEstimatedNps() const {
@@ -61,6 +68,7 @@ void StoppersHints::Reset() {
   // Type for N in nodes is currently uint32_t, so set limit in order not to
   // overflow it.
   remaining_playouts_ = 4000000000;
+  pruning_factor_ = 1.0;
   // NPS is not known.
   estimated_nps_.reset();
 }
