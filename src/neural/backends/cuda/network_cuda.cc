@@ -244,7 +244,22 @@ class CudaNetwork : public Network {
     showDeviceInfo(deviceProp, gpu_id_);
 
     l2_cache_size_ = deviceProp.l2CacheSize;
-    sm_count_ = deviceProp.multiProcessorCount;
+    const int kNumFilters = (int)weights.input.biases.size();
+    size_t model_size = kNumFilters;
+    if (!weights.encoder.empty()) {
+      model_size = weights.ip_emb_b.size() - 1;
+    }
+
+    size_t pre_model = model_size;
+
+    model_size = std::bit_width(model_size);
+
+    if (model_size > 10) {
+      opt_batch_size_ = deviceProp.multiProcessorCount / (model_size - 9);
+    } else {
+      opt_batch_size_ = deviceProp.multiProcessorCount * (11 - model_size);
+    }
+    opt_batch_size_ = options.GetOrDefault("opt_batch", opt_batch_size_);
 
     allow_cache_opt_ = options.GetOrDefault<bool>("cache_opt", false);
 
@@ -302,7 +317,6 @@ class CudaNetwork : public Network {
     }
 
     const int kNumInputPlanes = kInputPlanes;
-    const int kNumFilters = (int)weights.input.biases.size();
     numBlocks_ = (int)weights.residual.size();
     numFilters_ = kNumFilters;
 
@@ -1040,12 +1054,12 @@ class CudaNetwork : public Network {
 
   int GetMiniBatchSize() const override {
     // Simple heuristic that seems to work for a wide range of GPUs.
-    return sm_count_;
+    return opt_batch_size_;
   }
 
   int GetPreferredBatchStep() const override {
     int preferred_split = 7;
-    while (sm_count_ % preferred_split != 0) preferred_split++;
+    while (opt_batch_size_ % preferred_split != 0) preferred_split++;
     return preferred_split;
   }
 
@@ -1093,7 +1107,7 @@ class CudaNetwork : public Network {
   const NetworkCapabilities capabilities_;
   int gpu_id_;
   int l2_cache_size_;
-  int sm_count_;
+  int opt_batch_size_;
   int max_batch_size_;
   int min_batch_size_;
   bool enable_graph_capture_;
