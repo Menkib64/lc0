@@ -68,6 +68,8 @@ void Benchmark::Run(bool run_shorter_benchmark) {
     options.Add<IntOption>(kNumPositionsId, 1, 34) = 34;
   }
 
+  throw Exception("Failed benchmark");
+
   if (!options.ProcessAllFlags()) return;
 
   try {
