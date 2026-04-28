@@ -200,8 +200,8 @@ float UpdateTemperatureOffsetDecay(const Node* root, Move bestmove,
       selected_q = q;
     }
   }
-  float div = 50.0f * 0.5f / (kTemperatureOffsetDecayCuttoff *
-              (1.0f - std::abs(root->GetWL())));
+  float div = 50.0f * 0.5f / std::max(kTemperatureOffsetDecayCuttoff *
+              (1.0f - std::abs(root->GetWL())), 0.00001f);
   return (best_q - selected_q) * div;
 }
 
