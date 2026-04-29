@@ -109,6 +109,9 @@ class SearchParams {
   float GetTemperatureEndgameUtilityDeviation() const {
     return options_.Get<float>(kTempEndgameUtilityDeviationId);
   }
+  float GetTemperatureUtilityMaximumOffset() const {
+    return options_.Get<float>(kTemperatureUtilityMaximumOffsetId);
+  }
   float GetTemperature() const { return options_.Get<float>(kTemperatureId); }
   int GetScLimit() const { return options_.Get<int>(kScLimitId); }
   float GetHybridSamplingRatio() const { return options_.Get<float>(kHybridSamplingRatioId); }
@@ -232,6 +235,7 @@ class SearchParams {
   static const OptionId kTwoFoldDrawsId;
   static const OptionId kTempUtilityDeviationId;
   static const OptionId kTempEndgameUtilityDeviationId;
+  static const OptionId kTemperatureUtilityMaximumOffsetId;
   static const OptionId kTemperatureId;
   static const OptionId kScLimitId;
   static const OptionId kHybridSamplingRatioId;
