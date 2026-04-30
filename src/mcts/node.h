@@ -206,9 +206,7 @@ class Node {
   void MakeNotTerminal();
 
   void SetNodeLimitFrozen(bool value);
-  void SetNodeLimitFrozenLock(bool value);
   bool GetNodeLimitFrozen();
-  bool GetNodeLimitFrozenLock();
   uint8_t GetVisitedNumberOfEdges();
   void SetVisitedNumberOfEdges(int value);
 
@@ -349,7 +347,6 @@ class Node {
   // Whether the child_ is actually an array of equal length to edges.
   bool solid_children_ : 1;
   bool node_limit_frozen_ = false;
-  bool node_limit_frozen_lock_ = false;
 
   // TODO(mooskagh) Unfriend NodeTree.
   friend class NodeTree;
