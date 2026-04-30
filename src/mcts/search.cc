@@ -202,7 +202,7 @@ float UpdateTemperatureOffsetDecay(const Node* root, const SearchParams& params,
   }
   float div = 50.0f * 0.5f /
               std::max(kTemperatureOffsetDecayCuttoff *
-                           (1.0f - std::abs(root->GetWL())),
+                           (1.0f - std::abs(root->GetQ(draw_score))),
                        0.00001f);
   return (best_q - selected_q) * div;
 }
@@ -232,7 +232,7 @@ void GenerateRootUtilityOffsets(const Node* root, const SearchParams& params,
   auto& rng = Random::Get();
   for (int i = 0; i < legal_moves; i++) {
     float offset = std::clamp(dist(rng), min_offset, max_offset);
-    offsets.push_back(offset * (1.0f - std::abs(root->GetWL())));
+    offsets.push_back(offset);
   }
 }
 
@@ -687,7 +687,8 @@ std::vector<std::string> Search::GetVerboseStats(Node* node) const {
     float O = 0;
     if (node == root_node_ && !root_utility_offsets_.empty()) {
       unsigned index = node->GetChildIndex(edge.edge());
-      O = root_utility_offsets_[index];
+      O = root_utility_offsets_[index] *
+          std::max(0.0f, 1.0f - std::abs(node->GetQ(draw_score)));
       print(&oss, "(O: ", O, ") ", 8, 5);
     }
     print(&oss, "(S: ", Q + edge.GetU(U_coeff) + M + O, ") ", 8, 5);
@@ -1965,9 +1966,13 @@ void SearchWorker::PickNodesToExtendTask(
             int index = child->Index();
             visited_pol += current_pol[index];
             float q = child->GetQ(draw_score);
-        float o =
-            use_utility_offset ? search_->root_utility_offsets_[index] : 0.0f;
-        current_util[index] = q + m_evaluator.GetMUtility(child, q) + o;
+            float o =
+                use_utility_offset
+                    ? search_->root_utility_offsets_[index] *
+                          std::max(0.0f,
+                                   1.0f - std::abs(node->GetQ(draw_score)))
+                    : 0.0f;
+            current_util[index] = q + m_evaluator.GetMUtility(child, q) + o;
           }
           const float fpu =
               GetFpu(params_, node, is_root_node, draw_score, visited_pol);
@@ -2088,9 +2093,12 @@ void SearchWorker::PickNodesToExtendTask(
           int index = child->Index();
           visited_pol += current_pol[index];
           float q = child->GetQ(draw_score);
-        float o =
-            use_utility_offset ? search_->root_utility_offsets_[index] : 0.0f;
-        current_util[index] = q + m_evaluator.GetMUtility(child, q) + o;
+          float o =
+              use_utility_offset
+                  ? search_->root_utility_offsets_[index] *
+                        std::max(0.0f, 1.0f - std::abs(node->GetQ(draw_score)))
+                  : 0.0f;
+          current_util[index] = q + m_evaluator.GetMUtility(child, q) + o;
         }
         const float fpu =
             GetFpu(params_, node, is_root_node, draw_score, visited_pol);
