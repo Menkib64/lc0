@@ -34,6 +34,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -55,7 +56,8 @@ MoveList MakeRootMoveFilter(const MoveList& searchmoves,
                             SyzygyTablebase* syzygy_tb,
                             const PositionHistory& history,
                             const SearchParams& params,
-                            std::atomic<int>* tb_hits, bool* dtz_success) {
+                            std::atomic<int>* tb_hits, bool* dtz_success,
+                            uint64_t& disable_key) {
   assert(tb_hits);
   assert(dtz_success);
   // Search moves overrides tablebase.
@@ -80,7 +82,7 @@ MoveList MakeRootMoveFilter(const MoveList& searchmoves,
   }
   if (syzygy_tb->root_probe(
           history.Last(), fast_play || history.DidRepeatSinceLastZeroingMove(),
-          use_only_wins, &root_moves)) {
+          use_only_wins, &root_moves, disable_key)) {
     *dtz_success = true;
     tb_hits->fetch_add(1, std::memory_order_acq_rel);
   } else if (syzygy_tb->root_probe_wdl(history.Last(), &root_moves)) {
@@ -257,9 +259,9 @@ Search::Search(SearchCachedState& state, const NodeTree& tree, Network* network,
       searchmoves_(searchmoves),
       start_time_(start_time),
       initial_visits_(root_node_->GetN()),
-      root_move_filter_(MakeRootMoveFilter(searchmoves_, syzygy_tb_,
-                                           played_history_, params_, &tb_hits_,
-                                           &root_is_in_dtz_)),
+      root_move_filter_(
+          MakeRootMoveFilter(searchmoves_, syzygy_tb_, played_history_, params_,
+                             &tb_hits_, &root_is_in_dtz_, syzygy_disable_key_)),
       uci_responder_(std::move(uci_responder)) {
   if (params_.GetMaxConcurrentSearchers() != 0) {
     pending_searchers_.store(params_.GetMaxConcurrentSearchers(),
@@ -1854,7 +1856,8 @@ void SearchWorker::PickNodesToExtendTask(
         multiplier = std::clamp(multiplier, 1.0f, 4.0f);
       }
       const int opponent_node_limit =
-          static_cast<int>(params_.GetScLimit() * multiplier);
+          std::min(static_cast<int64_t>(params_.GetScLimit() * multiplier),
+                   (int64_t)std::numeric_limits<int>::max());
       int current_node_count = node->GetN();
       bool node_limit_frozen = node->GetNodeLimitFrozen();
 
@@ -2390,7 +2393,8 @@ void SearchWorker::ExtendNode(Node* node, NodeToProcess& picked_node,
         (board.ours() | board.theirs()).count() <=
             search_->syzygy_tb_->max_cardinality()) {
       ProbeState state;
-      WDLScore wdl = search_->syzygy_tb_->probe_wdl(history->Last(), &state);
+      WDLScore wdl = search_->syzygy_tb_->probe_wdl(
+          history->Last(), &state, search_->syzygy_disable_key_);
       // Only fail state means the WDL is wrong, probe_wdl may produce correct
       // result with a stat other than OK.
       if (state != FAIL) {

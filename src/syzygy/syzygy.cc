@@ -1005,8 +1005,8 @@ class SyzygyTablebaseImpl {
 
   int max_cardinality() const { return max_cardinality_; }
 
-  int probe_wdl_table(const ChessBoard& pos, int* success) {
-    return probe_table(pos, 0, success, WDL);
+  int probe_wdl_table(const ChessBoard& pos, int* success, Key disable_key) {
+    return probe_table(pos, 0, success, WDL, disable_key);
   }
 
   int probe_dtm_table(const ChessBoard& pos, int won, int* success) {
@@ -1317,9 +1317,14 @@ class SyzygyTablebaseImpl {
     return true;
   }
 
-  int probe_table(const ChessBoard& pos, int s, int* success, const int type) {
+  int probe_table(const ChessBoard& pos, int s, int* success, const int type, Key disable_key = 0) {
     // Obtain the position's material-signature key
     const Key key = calc_key_from_position(pos);
+
+    if (key == disable_key) {
+      *success = 0;
+      return 0;
+    }
 
     // Test for KvK
     if (type == WDL && (pos.ours() | pos.theirs()) == pos.kings()) {
@@ -1490,7 +1495,7 @@ bool SyzygyTablebase::init(const std::string& paths) {
 // store wrong values for positions where the best move is an ep-move (even if
 // losing). So in all these cases set the state to ZEROING_BEST_MOVE.
 template <bool CheckZeroingMoves>
-WDLScore SyzygyTablebase::search(const Position& pos, ProbeState* result) {
+WDLScore SyzygyTablebase::search(const Position& pos, ProbeState* result, Key disable_key) {
   WDLScore value;
   WDLScore best_value = WDL_LOSS;
   auto move_list = pos.GetBoard().GenerateLegalMoves();
@@ -1503,7 +1508,7 @@ WDLScore SyzygyTablebase::search(const Position& pos, ProbeState* result) {
     }
     move_count++;
     auto new_pos = Position(pos, move);
-    value = static_cast<WDLScore>(-search(new_pos, result));
+    value = static_cast<WDLScore>(-search(new_pos, result, disable_key));
     if (*result == FAIL) return WDL_DRAW;
     if (value > best_value) {
       best_value = value;
@@ -1525,7 +1530,7 @@ WDLScore SyzygyTablebase::search(const Position& pos, ProbeState* result) {
   } else {
     int raw_result = static_cast<int>(ProbeState::OK);
     value = static_cast<WDLScore>(
-        impl_->probe_wdl_table(pos.GetBoard(), &raw_result));
+        impl_->probe_wdl_table(pos.GetBoard(), &raw_result, disable_key));
     *result = static_cast<ProbeState>(raw_result);
     if (*result == FAIL) return WDL_DRAW;
   }
@@ -1546,9 +1551,9 @@ WDLScore SyzygyTablebase::search(const Position& pos, ProbeState* result) {
 //  0 : draw
 //  1 : win, but draw under 50-move rule
 //  2 : win
-WDLScore SyzygyTablebase::probe_wdl(const Position& pos, ProbeState* result) {
+WDLScore SyzygyTablebase::probe_wdl(const Position& pos, ProbeState* result, uint64_t disable_key) {
   *result = OK;
-  return search(pos, result);
+  return search(pos, result, disable_key);
 }
 
 // Probe the DTZ table for a particular position.
@@ -1626,7 +1631,9 @@ int SyzygyTablebase::probe_dtz(const Position& pos, ProbeState* result) {
 //
 // A return value false indicates that not all probes were successful.
 bool SyzygyTablebase::root_probe(const Position& pos, bool has_repeated,
-                                 bool win_only, std::vector<Move>* safe_moves) {
+                                 bool win_only, std::vector<Move>* safe_moves, uint64_t& disable_key) {
+
+  disable_key = calc_key_from_position(pos.GetBoard());
   ProbeState result;
   auto root_moves = pos.GetBoard().GenerateLegalMoves();
   // Obtain 50-move counter for the root position
@@ -1643,7 +1650,7 @@ bool SyzygyTablebase::root_probe(const Position& pos, bool has_repeated,
     // Calculate dtz for the current move counting from the root position
     if (next_pos.GetRule50Ply() == 0) {
       // In case of a zeroing move, dtz is one of -101/-1/0/1/101
-      const WDLScore wdl = static_cast<WDLScore>(-probe_wdl(next_pos, &result));
+      const WDLScore wdl = static_cast<WDLScore>(-probe_wdl(next_pos, &result, 0));
       dtz = dtz_before_zeroing(wdl);
     } else {
       // Otherwise, take dtz for the new position and correct by 1 ply
@@ -1674,6 +1681,7 @@ bool SyzygyTablebase::root_probe(const Position& pos, bool has_repeated,
     }
     counter++;
   }
+  disable_key = 0;
   return true;
 }
 
@@ -1692,7 +1700,7 @@ bool SyzygyTablebase::root_probe_wdl(const Position& pos,
   // Probe and rank each move
   for (auto& m : root_moves) {
     Position nextPos = Position(pos, m);
-    const WDLScore wdl = static_cast<WDLScore>(-probe_wdl(nextPos, &result));
+    const WDLScore wdl = static_cast<WDLScore>(-probe_wdl(nextPos, &result, 0));
     if (result == FAIL) return false;
     ranks.push_back(WDL_to_rank[wdl + 2]);
     if (ranks.back() > best_rank) best_rank = ranks.back();
