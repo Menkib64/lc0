@@ -1845,32 +1845,26 @@ void SearchWorker::PickNodesToExtendTask(
       int opponent_node_limit = params_.GetScLimit();
       int current_node_count = node->GetN();
       bool node_limit_frozen = node->GetNodeLimitFrozen();
-      bool node_limit_frozen_lock = node->GetNodeLimitFrozenLock();
 
       if (is_opponent_node && current_node_count >= opponent_node_limit) {
         if (!(node_limit_frozen)) {
-          if (!node_limit_frozen_lock) {
-            node->SetNodeLimitFrozenLock(true);
-            float sum_n = 0;
-            float sum_p = 0;
-            int indchild = 0;
-            for (Node* child : node->VisitedNodes()) {
-              sum_n = sum_n + child->GetN();
-              indchild++;
-            }
-            for (Node* child : node->VisitedNodes()) {
-              sum_p = sum_p + child->GetN() / sum_n;
-              child->GetOwnEdge()->SetP_frozen(sum_p);
-            }
-            node->SetNodeLimitFrozen(true);
-            node->SetVisitedNumberOfEdges(indchild);
-            node->SetNodeLimitFrozenLock(false);
+          float sum_n = 0;
+          float sum_p = 0;
+          int indchild = 0;
+          for (Node* child : node->VisitedNodes()) {
+            sum_n = sum_n + child->GetN();
+            indchild++;
           }
+          for (Node* child : node->VisitedNodes()) {
+            sum_p = sum_p + child->GetN() / sum_n;
+            child->GetOwnEdge()->SetP_frozen(sum_p);
+          }
+          node->SetNodeLimitFrozen(true);
+          node->SetVisitedNumberOfEdges(indchild);
         }
       }
 
       node_limit_frozen = node->GetNodeLimitFrozen();
-      node_limit_frozen_lock = node->GetNodeLimitFrozenLock();
 
       if (is_opponent_node && node_limit_frozen) {
         const float hybrid_ratio = params_.GetDynamicHybridRatio(node->GetN());
@@ -1880,9 +1874,6 @@ void SearchWorker::PickNodesToExtendTask(
         int puct_visits = cur_limit - ts_visits;
 
         if (ts_visits > 0) {
-          while (node_limit_frozen_lock) {
-            node_limit_frozen_lock = node->GetNodeLimitFrozenLock();
-          }
 
           node->CopyPolicy_frozen(max_needed,
                                   current_cumulative_pol_frozen.data());
