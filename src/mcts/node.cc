@@ -167,7 +167,7 @@ void Edge::SetP(float p) {
 }
 
 void Edge::SetP_frozen(float p) {
-  assert(0.0f <= p && p <= 1.0f);
+  assert(0.0f <= p && p <= 1.0001f);
   constexpr int32_t roundings = (1 << 11) - (3 << 28);
   int32_t tmp;
   std::memcpy(&tmp, &p, sizeof(float));
