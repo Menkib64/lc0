@@ -730,8 +730,17 @@ void Search::SendMovesStats() const REQUIRES(counters_mutex_) {
     }
     if (edge.HasNode()) {
       LOGFILE << "--- Opponent moves after: " << final_bestmove_.as_string();
+      std::vector<ThinkingInfo> infos;
       for (const auto& line : GetVerboseStats(edge.node())) {
         LOGFILE << line;
+        if (params_.GetVerboseStats()) {
+          ThinkingInfo info;
+          info.comment = line;
+          infos.push_back(info);
+        }
+      }
+      if (params_.GetVerboseStats()) {
+        uci_responder_->OutputThinkingInfo(&infos);
       }
     }
   }
