@@ -687,6 +687,7 @@ std::vector<std::string> Search::GetVerboseStats(Node* node) const {
     print_stats(&oss, edge.node());
     print(&oss, "(U: ", edge.GetU(U_coeff), ") ", 6, 5);
     float O = 0;
+    print(&oss, "(UM: ", M, ") ", 6, 5);
     if (node == root_node_ && !root_utility_offsets_.empty()) {
       unsigned index = node->GetChildIndex(edge.edge());
       O = root_utility_offsets_[index] *
