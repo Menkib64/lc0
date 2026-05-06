@@ -34,36 +34,44 @@ const OptionId SearchParams::kUseUncertaintyWeightingId{
     {.long_flag = "use-uncertainty-weighting",
      .uci_option = "UseUncertaintyWeighting",
      .help_text = "Enable uncertainty weighting in MCTS."}};
-const OptionId SearchParams::kUncertaintyWeightingCapId{
-    {.long_flag = "uncertainty-weighting-cap",
-     .uci_option = "UncertaintyWeightingCap",
-     .help_text = "Cap for node weight from uncertainty weighting."}};
-const OptionId SearchParams::kUncertaintyWeightingCoefficientId{
-    {.long_flag = "uncertainty-weighting-coefficient",
-     .uci_option = "UncertaintyWeightingCoefficient",
-     .help_text = "Coefficient in the uncertainty weighting formula."}};
-const OptionId SearchParams::kUncertaintyWeightingExponentId{
-    {.long_flag = "uncertainty-weighting-exponent",
-     .uci_option = "UncertaintyWeightingExponent",
-     .help_text = "Exponent in the uncertainty weighting formula."}};
+const OptionId SearchParams::kUncertaintyWeightingMidPointId{
+    {.long_flag = "uncertainty-weighting-mid-point",
+     .uci_option = "UncertaintyWeightingMidPoint",
+     .help_text = "The mid point of logistic function."}};
+const OptionId SearchParams::kUncertaintyWeightingMinusExponentId{
+    {.long_flag = "uncertainty-weighting-minus-exponent",
+     .uci_option = "UncertaintyWeightingMinusExponent",
+     .help_text = "Minus exponent in the logistic function."}};
+const OptionId SearchParams::kUncertaintyWeightingScaleId{
+    {.long_flag = "uncertainty-weighting-scale",
+     .uci_option = "UncertaintyWeightingScale",
+     .help_text = "Numerator in the logistic function."}};
+const OptionId SearchParams::kUncertaintyWeightingBaseId{
+    {.long_flag = "uncertainty-weighting-base",
+     .uci_option = "UncertaintyWeightingBase",
+     .help_text = "Base value in the logistic function."}};
 
 void SearchParams::Populate(OptionsParser* options) {
   BaseSearchParams::Populate(options);
   options->Add<BoolOption>(kUseUncertaintyWeightingId) = true;
-  options->Add<FloatOption>(kUncertaintyWeightingCapId, 0.0f, 10.0f) = 1.039f;
-  options->Add<FloatOption>(kUncertaintyWeightingCoefficientId, 0.0f, 10.0f) =
-      0.296f;
-  options->Add<FloatOption>(kUncertaintyWeightingExponentId, -10.0f, 0.0f) =
-      -0.336f;
+  options->Add<FloatOption>(kUncertaintyWeightingMidPointId, 0.0f, 1.0f) =
+      0.04f;
+  options->Add<FloatOption>(kUncertaintyWeightingMinusExponentId, 0.0f,
+                            1000.0f) = 75.0f;
+  options->Add<FloatOption>(kUncertaintyWeightingScaleId, 0.0f, 10.0f) = 0.395;
+  options->Add<FloatOption>(kUncertaintyWeightingBaseId, 0.0f, 10.0f) = 0.68f;
 }
 
 SearchParams::SearchParams(const OptionsDict& options)
     : BaseSearchParams(options),
       kUseUncertaintyWeighting(options.Get<bool>(kUseUncertaintyWeightingId)),
-      kUncertaintyWeightingCap(options.Get<float>(kUncertaintyWeightingCapId)),
-      kUncertaintyWeightingCoefficient(
-          options.Get<float>(kUncertaintyWeightingCoefficientId)),
-      kUncertaintyWeightingExponent(
-          options.Get<float>(kUncertaintyWeightingExponentId)) {}
+      kUncertaintyWeightingMidPoint(
+          options.Get<float>(kUncertaintyWeightingMidPointId)),
+      kUncertaintyWeightingMinusExponent(
+          options.Get<float>(kUncertaintyWeightingMinusExponentId)),
+      kUncertaintyWeightingScale(
+          options.Get<float>(kUncertaintyWeightingScaleId)),
+      kUncertaintyWeightingBase(
+          options.Get<float>(kUncertaintyWeightingBaseId)) {}
 }  // namespace dag_classic
 }  // namespace lczero

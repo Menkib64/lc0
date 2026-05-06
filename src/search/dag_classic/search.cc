@@ -2162,10 +2162,13 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process) {
     const float e = eval.e;
     assert(e >= 0.0f);
     assert(e <= 1.0f);
-    const float cap = params_.GetUncertaintyWeightingCap();
-    const float coefficient = params_.GetUncertaintyWeightingCoefficient();
-    const float exponent = params_.GetUncertaintyWeightingExponent();
-    eval.e = std::min(cap, coefficient * FastExp(exponent * FastLog(e)));
+    const float t0 = params_.GetUncertaintyWeightingMidPoint();
+    const float minus_r = params_.GetUncertaintyWeightingMinusExponent();
+    const float scale = params_.GetUncertaintyWeightingScale();
+    const float y0 = params_.GetUncertaintyWeightingBase();
+    const float exponent = minus_r * (e - t0);
+    const float scaled = scale / (1.0f + FastExp(exponent));
+    eval.e = y0 + scaled;
   } else {
     eval.e = 1.0f;
   }
@@ -2299,7 +2302,8 @@ void SearchWorker::DoBackupUpdateSingleNode(
   float d_delta = 0.0f;
   float m_delta = 0.0f;
 
-  float avg_weight = params_.GetUncertaintyWeightingCap();
+  float avg_weight = params_.GetUncertaintyWeightingBase() +
+                     params_.GetUncertaintyWeightingScale();
 
   // Update the low node at the start of the backup path first, but only visit
   // it the first time that backup sees it.

@@ -44,25 +44,30 @@ class SearchParams : public classic::BaseSearchParams {
 
   // Parameter getters.
   bool GetUseUncertaintyWeighting() const { return kUseUncertaintyWeighting; }
-  float GetUncertaintyWeightingCap() const { return kUncertaintyWeightingCap; }
-  float GetUncertaintyWeightingCoefficient() const {
-    return kUncertaintyWeightingCoefficient;
+  float GetUncertaintyWeightingMidPoint() const { return kUncertaintyWeightingMidPoint; }
+  float GetUncertaintyWeightingMinusExponent() const {
+    return kUncertaintyWeightingMinusExponent;
   }
-  float GetUncertaintyWeightingExponent() const {
-    return kUncertaintyWeightingExponent;
+  float GetUncertaintyWeightingScale() const {
+    return kUncertaintyWeightingScale;
+  }
+  float GetUncertaintyWeightingBase() const {
+    return kUncertaintyWeightingBase;
   }
 
   // Search parameter IDs.
   static const OptionId kUseUncertaintyWeightingId;
-  static const OptionId kUncertaintyWeightingCapId;
-  static const OptionId kUncertaintyWeightingCoefficientId;
-  static const OptionId kUncertaintyWeightingExponentId;
+  static const OptionId kUncertaintyWeightingMidPointId;
+  static const OptionId kUncertaintyWeightingMinusExponentId;
+  static const OptionId kUncertaintyWeightingScaleId;
+  static const OptionId kUncertaintyWeightingBaseId;
 
   // Search parameter values.
   const bool kUseUncertaintyWeighting;
-  const float kUncertaintyWeightingCap;
-  const float kUncertaintyWeightingCoefficient;
-  const float kUncertaintyWeightingExponent;
+  const float kUncertaintyWeightingMidPoint;
+  const float kUncertaintyWeightingMinusExponent;
+  const float kUncertaintyWeightingScale;
+  const float kUncertaintyWeightingBase;
 };
 
 }  // namespace dag_classic
