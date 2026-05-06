@@ -486,8 +486,8 @@ class SearchWorker {
   // Return true if adjustment happened.
   bool MaybeAdjustForTerminalOrTransposition(
       Node* n, const std::shared_ptr<LowNode>& nl, float& v, float& d, float& m,
-      float& weight_to_fix, float& v_delta, float& d_delta, float& m_delta,
-      bool& update_parent_bounds) const;
+      double avg_weight, float& weight_to_fix, float& v_delta, float& d_delta,
+      float& m_delta, bool& update_parent_bounds) const;
   void DoBackupUpdateSingleNode(const NodeToProcess& node_to_process);
   // Returns whether a node's bounds were set based on its children.
   bool MaybeSetBounds(Node* p, float m, float* weight_to_fix, float* v_delta,

@@ -586,12 +586,12 @@ std::vector<std::string> Search::GetVerboseStats(
           EvalPosition{history.GetPositions(), {}});
       if (nneval) {
         v = -nneval->q;
-        e = nneval->e;
+        e = std::sqrt(nneval->e);
       }
     }
     if (v) {
-      print(oss, "(E: ", e, ") ", 7, 4);
       print(oss, "(V: ", sign * *v, ") ", 7, 4);
+      print(oss, "(E: ", e, ") ", 7, 4);
     } else {
       *oss << "(V:  -.----) ";
     }
@@ -2159,13 +2159,20 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process) {
   wdl_rescale();
   auto& eval = *node_to_process->eval.get();
   if (params_.GetUseUncertaintyWeighting()) {
-    const float e = eval.e;
-    assert(e >= 0.0f);
-    assert(e <= 1.0f);
+    assert(eval.e >= 0.0f);
+    assert(eval.e <= 1.0f);
+    const float e = std::sqrt(eval.e);
+    const float t0 = params_.GetUncertaintyWeightingMidPoint();
+    const float minus_r = params_.GetUncertaintyWeightingMinusExponent();
+    const float scale = params_.GetUncertaintyWeightingScale();
+    const float y0 = params_.GetUncertaintyWeightingBase();
     const float cap = params_.GetUncertaintyWeightingCap();
-    const float coefficient = params_.GetUncertaintyWeightingCoefficient();
-    const float exponent = params_.GetUncertaintyWeightingExponent();
-    eval.e = std::min(cap, coefficient * FastExp(exponent * FastLog(e)));
+    const float exponent = minus_r * (e - t0);
+    const float scaled = exponent < -20.0f ? scale
+                         : exponent > 20.0f
+                             ? 0.0f
+                             : scale / (1.0f + FastExp(exponent));
+    eval.e = std::min(y0 + scaled, cap);
   } else {
     eval.e = 1.0f;
   }
@@ -2202,8 +2209,8 @@ void SearchWorker::DoBackupUpdate() {
 
 bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
     Node* n, const std::shared_ptr<LowNode>& nl, float& v, float& d, float& m,
-    float& weight_to_fix, float& v_delta, float& d_delta, float& m_delta,
-    bool& update_parent_bounds) const {
+    float avg_weight, float& weight_to_fix, float& v_delta, float& d_delta,
+    float& m_delta, bool& update_parent_bounds) const {
   if (n->IsTerminal()) {
     v = n->GetWL();
     d = n->GetD();
@@ -2214,7 +2221,7 @@ bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
 
   // Use information from transposition or a new terminal.
   if (nl->IsTransposition() || nl->IsTerminal() ||
-      n->GetWeight() < nl->GetWeight()) {
+      n->GetWeight() + avg_weight < nl->GetWeight()) {
     // Adapt information from low node to node by flipping Q sign, bounds,
     // result and incrementing m.
     v = -nl->GetWL();
@@ -2321,8 +2328,8 @@ void SearchWorker::DoBackupUpdateSingleNode(
     d = 1.0f;
     m = 1;
   } else if (!MaybeAdjustForTerminalOrTransposition(
-                 n, nl, v, d, m, weight_to_fix, v_delta, d_delta, m_delta,
-                 update_parent_bounds)) {
+                 n, nl, v, d, m, avg_weight, weight_to_fix, v_delta, d_delta,
+                 m_delta, update_parent_bounds)) {
     // If there is nothing better, use original NN values adjusted for node.
     v = -nl->GetWL();
     d = nl->GetD();
@@ -2382,9 +2389,9 @@ void SearchWorker::DoBackupUpdateSingleNode(
     v_delta = -v_delta;
     m++;
 
-    MaybeAdjustForTerminalOrTransposition(p, pl, v, d, m, weight_to_fix,
-                                          v_delta, d_delta, m_delta,
-                                          update_parent_bounds);
+    MaybeAdjustForTerminalOrTransposition(p, pl, v, d, m, avg_weight,
+                                          weight_to_fix, v_delta, d_delta,
+                                          m_delta, update_parent_bounds);
 
     // Update the stats.
     // Best move.
