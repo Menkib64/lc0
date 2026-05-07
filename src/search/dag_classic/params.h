@@ -54,6 +54,9 @@ class SearchParams : public classic::BaseSearchParams {
   float GetUncertaintyWeightingBase() const {
     return kUncertaintyWeightingBase;
   }
+  float GetUncertaintyWeightingSkewExponent() const {
+    return kUncertaintyWeightingSkewExponent;
+  }
 
   // Search parameter IDs.
   static const OptionId kUseUncertaintyWeightingId;
@@ -61,6 +64,7 @@ class SearchParams : public classic::BaseSearchParams {
   static const OptionId kUncertaintyWeightingMinusExponentId;
   static const OptionId kUncertaintyWeightingScaleId;
   static const OptionId kUncertaintyWeightingBaseId;
+  static const OptionId kUncertaintyWeightingSkewRootId;
 
   // Search parameter values.
   const bool kUseUncertaintyWeighting;
@@ -68,6 +72,7 @@ class SearchParams : public classic::BaseSearchParams {
   const float kUncertaintyWeightingMinusExponent;
   const float kUncertaintyWeightingScale;
   const float kUncertaintyWeightingBase;
+  const float kUncertaintyWeightingSkewExponent;
 };
 
 }  // namespace dag_classic

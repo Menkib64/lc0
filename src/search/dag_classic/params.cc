@@ -50,6 +50,10 @@ const OptionId SearchParams::kUncertaintyWeightingBaseId{
     {.long_flag = "uncertainty-weighting-base",
      .uci_option = "UncertaintyWeightingBase",
      .help_text = "Base value in the logistic function."}};
+const OptionId SearchParams::kUncertaintyWeightingSkewRootId{
+    {.long_flag = "uncertainty-weighting-skew-root",
+     .uci_option = "UncertaintyWeightingSkewRoot",
+     .help_text = "Error output is adjusted to root which skews logistic function."}};
 
 void SearchParams::Populate(OptionsParser* options) {
   BaseSearchParams::Populate(options);
@@ -57,9 +61,10 @@ void SearchParams::Populate(OptionsParser* options) {
   options->Add<FloatOption>(kUncertaintyWeightingMidPointId, 0.0f, 1.0f) =
       0.04f;
   options->Add<FloatOption>(kUncertaintyWeightingMinusExponentId, 0.0f,
-                            1000.0f) = 75.0f;
+                            1000000.0f) = 75.0f;
   options->Add<FloatOption>(kUncertaintyWeightingScaleId, 0.0f, 10.0f) = 0.395;
   options->Add<FloatOption>(kUncertaintyWeightingBaseId, 0.0f, 10.0f) = 0.68f;
+  options->Add<FloatOption>(kUncertaintyWeightingSkewRootId, 0.01f, 10000.0f) = 1.0f;
 }
 
 SearchParams::SearchParams(const OptionsDict& options)
@@ -72,6 +77,8 @@ SearchParams::SearchParams(const OptionsDict& options)
       kUncertaintyWeightingScale(
           options.Get<float>(kUncertaintyWeightingScaleId)),
       kUncertaintyWeightingBase(
-          options.Get<float>(kUncertaintyWeightingBaseId)) {}
+          options.Get<float>(kUncertaintyWeightingBaseId)),
+      kUncertaintyWeightingSkewExponent(
+          1 / options.Get<float>(kUncertaintyWeightingSkewRootId)) {}
 }  // namespace dag_classic
 }  // namespace lczero
