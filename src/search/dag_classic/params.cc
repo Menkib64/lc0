@@ -79,6 +79,6 @@ SearchParams::SearchParams(const OptionsDict& options)
       kUncertaintyWeightingBase(
           options.Get<float>(kUncertaintyWeightingBaseId)),
       kUncertaintyWeightingSkewExponent(
-          1 / options.Get<float>(kUncertaintyWeightingSkewRootId)) {}
+          1.0f / options.Get<float>(kUncertaintyWeightingSkewRootId)) {}
 }  // namespace dag_classic
 }  // namespace lczero
