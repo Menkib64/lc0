@@ -2168,7 +2168,7 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process) {
     const float scale = params_.GetUncertaintyWeightingScale();
     const float y0 = params_.GetUncertaintyWeightingBase();
     const float adjusted_e = std::pow(e, skew);
-    const float exponent = minus_r * (adjusted_e - t0);
+    const float exponent = minus_r * (adjusted_e - std::pow(t0, skew));
     const float scaled = scale / (1.0f + FastExp(exponent));
     eval.e = y0 + scaled;
   } else {
