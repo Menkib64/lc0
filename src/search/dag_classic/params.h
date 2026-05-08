@@ -68,11 +68,11 @@ class SearchParams : public classic::BaseSearchParams {
 
   // Search parameter values.
   const bool kUseUncertaintyWeighting;
+  const float kUncertaintyWeightingSkewExponent;
   const float kUncertaintyWeightingMidPoint;
   const float kUncertaintyWeightingMinusExponent;
   const float kUncertaintyWeightingScale;
   const float kUncertaintyWeightingBase;
-  const float kUncertaintyWeightingSkewExponent;
 };
 
 }  // namespace dag_classic

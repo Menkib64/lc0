@@ -27,6 +27,8 @@
 
 #include "search/dag_classic/params.h"
 
+#include <cmath>
+
 namespace lczero {
 namespace dag_classic {
 
@@ -53,7 +55,8 @@ const OptionId SearchParams::kUncertaintyWeightingBaseId{
 const OptionId SearchParams::kUncertaintyWeightingSkewRootId{
     {.long_flag = "uncertainty-weighting-skew-root",
      .uci_option = "UncertaintyWeightingSkewRoot",
-     .help_text = "Error output is adjusted to root which skews logistic function."}};
+     .help_text =
+         "Error output is adjusted to root which skews logistic function."}};
 
 void SearchParams::Populate(OptionsParser* options) {
   BaseSearchParams::Populate(options);
@@ -64,21 +67,25 @@ void SearchParams::Populate(OptionsParser* options) {
                             1000000.0f) = 75.0f;
   options->Add<FloatOption>(kUncertaintyWeightingScaleId, 0.0f, 10.0f) = 0.395;
   options->Add<FloatOption>(kUncertaintyWeightingBaseId, 0.0f, 10.0f) = 0.68f;
-  options->Add<FloatOption>(kUncertaintyWeightingSkewRootId, 0.01f, 10000.0f) = 1.0f;
+  options->Add<FloatOption>(kUncertaintyWeightingSkewRootId, 0.01f, 10000.0f) =
+      1.0f;
 }
 
 SearchParams::SearchParams(const OptionsDict& options)
     : BaseSearchParams(options),
       kUseUncertaintyWeighting(options.Get<bool>(kUseUncertaintyWeightingId)),
+      kUncertaintyWeightingSkewExponent(
+          1.0 / options.Get<float>(kUncertaintyWeightingSkewRootId)),
       kUncertaintyWeightingMidPoint(
-          options.Get<float>(kUncertaintyWeightingMidPointId)),
+          std::pow<double>(options.Get<float>(kUncertaintyWeightingMidPointId),
+                           kUncertaintyWeightingSkewExponent)),
       kUncertaintyWeightingMinusExponent(
-          options.Get<float>(kUncertaintyWeightingMinusExponentId)),
+          (0.0 + options.Get<float>(kUncertaintyWeightingMinusExponentId)) *
+          options.Get<float>(kUncertaintyWeightingMidPointId) /
+          kUncertaintyWeightingMidPoint / kUncertaintyWeightingSkewExponent),
       kUncertaintyWeightingScale(
           options.Get<float>(kUncertaintyWeightingScaleId)),
       kUncertaintyWeightingBase(
-          options.Get<float>(kUncertaintyWeightingBaseId)),
-      kUncertaintyWeightingSkewExponent(
-          1.0f / options.Get<float>(kUncertaintyWeightingSkewRootId)) {}
+          options.Get<float>(kUncertaintyWeightingBaseId)) {}
 }  // namespace dag_classic
 }  // namespace lczero
