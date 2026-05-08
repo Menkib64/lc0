@@ -80,9 +80,13 @@ SearchParams::SearchParams(const OptionsDict& options)
           std::pow<double>(options.Get<float>(kUncertaintyWeightingMidPointId),
                            kUncertaintyWeightingSkewExponent)),
       kUncertaintyWeightingMinusExponent(
-          (0.0 + options.Get<float>(kUncertaintyWeightingMinusExponentId)) *
-          options.Get<float>(kUncertaintyWeightingMidPointId) /
-          kUncertaintyWeightingMidPoint / kUncertaintyWeightingSkewExponent),
+          kUncertaintyWeightingMidPoint > 0.0f
+              ? (0.0 +
+                 options.Get<float>(kUncertaintyWeightingMinusExponentId)) *
+                    options.Get<float>(kUncertaintyWeightingMidPointId) /
+                    kUncertaintyWeightingMidPoint /
+                    kUncertaintyWeightingSkewExponent
+              : options.Get<float>(kUncertaintyWeightingMinusExponentId)),
       kUncertaintyWeightingScale(
           options.Get<float>(kUncertaintyWeightingScaleId)),
       kUncertaintyWeightingBase(
