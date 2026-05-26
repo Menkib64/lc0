@@ -1833,6 +1833,9 @@ void SearchWorker::PickNodesToExtendTask(
           }
           current_nstarted[idx] = cur_iters[idx].GetNStarted();
           (*visits_to_perform.back())[idx] = 0;
+          current_score[idx] =
+              current_pol[idx] * puct_mult / (1 + current_nstarted[idx]) +
+              current_util[idx];
 
           if (cur_iters[idx].GetN() == 0) {
             // If child hasn't been visited yet, we don't force any exploration.
@@ -1848,6 +1851,9 @@ void SearchWorker::PickNodesToExtendTask(
           (*visits_to_perform.back())[idx] =
               AddForcedExploration(params_, node, cur_iters[idx], cur_limit,
                                    current_pol[idx], current_nstarted[idx]);
+          current_score[idx] =
+              current_pol[idx] * puct_mult / (1 + current_nstarted[idx]) +
+              current_util[idx];
         }
         vtp_last_filled.back() = cache_filled_idx;
       }
