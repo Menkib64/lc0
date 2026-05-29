@@ -631,6 +631,10 @@ class CudaNetwork : public Network {
 
     tensor_mem_size_ = multi_stream_ ? maxSize : 0;
 
+    if (!options.GetOrDefault("capture_graphs_onload", true)) {
+      return;
+    }
+
     // pre-allocate cuda graphs for search threads
     auto allocateCudaGraphs = [&] {
       ReportCUDAErrors(cudaSetDevice(gpu_id_));

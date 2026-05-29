@@ -679,6 +679,10 @@ class CudnnNetwork : public Network {
          << " bytes of GPU memory to run the network";
 #endif
 
+    if (!options.GetOrDefault("capture_graphs_onload", true)) {
+      return;
+    }
+
     // pre-allocate cuda graphs for search threads
     auto allocateCudaGraphs = [&] {
       CudnnNetworkComputation<DataType> comp(this, wdl_, moves_left_);
