@@ -114,7 +114,7 @@ struct InputsOutputs {
     ReportCUDAErrors(
         cudaEventCreateWithFlags(&value_done_event_, cudaEventDisableTiming));
     ReportCUDAErrors(cudaEventCreateWithFlags(&wdl_download_done_event_,
-                                              cudaEventDisableTiming));
+                                              cudaEventDisableTiming | cudaEventBlockingSync));
     ReportCUDAErrors(cudaEventCreateWithFlags(&download_done_event_,
                                               cudaEventDisableTiming));
 
