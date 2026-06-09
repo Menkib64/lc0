@@ -323,6 +323,10 @@ class HashKeyedCacheLock {
     other.value_ = nullptr;
   }
 
+  uint64_t GetKey() const {
+    return key_;
+  }
+
  private:
   HashKeyedCache<V>* cache_ = nullptr;
   uint64_t key_;

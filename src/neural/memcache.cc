@@ -149,9 +149,11 @@ class MemCacheComputation : public BackendComputation {
                                (lock->p && lock->num_moves == pos.legal_moves.size()))) {
       value.reset();
       auto state = lock->state.load(std::memory_order_acquire);
+      LOGFILE << "Cache state load after insert: " << state << " for hash " << hash;
       while (state == CachedValue::NOT_QUEUED) {
         if (lock->state.compare_exchange_weak(state, CachedValue::NO_WAITERS,
                                               std::memory_order_acq_rel)) {
+          CERR << "Set state to NO_WAITERS for hash " << hash;
           to_be_queued = true;
           break;
         }
@@ -207,8 +209,10 @@ class MemCacheComputation : public BackendComputation {
           auto& lock = entry.lock;
           assert(lock.holds_value());
           CachedValueToEvalResult(**lock, entry.result_ptr);
+          LOGFILE << "Setting state to READY for hash " << lock.GetKey();
           auto state = lock->state.exchange(CachedValue::READY,
                                             std::memory_order_release);
+          LOGFILE << "Setting state was " << state << " for hash " << lock.GetKey();
           // Wake up waiters if there are any,
           if (state == CachedValue::WAITERS) {
             lock->state.notify_all();
@@ -223,6 +227,7 @@ class MemCacheComputation : public BackendComputation {
         auto& lock = entry.lock;
         assert(lock.holds_value());
         auto state = lock->state.load(std::memory_order_acquire);
+        LOGFILE << "State load in delayed fetch: " << state << " for hash " << lock.GetKey();
         // Make sure writing side knows about waiters
         if (state == CachedValue::NO_WAITERS) {
           lock->state.compare_exchange_strong(state, CachedValue::WAITERS,
@@ -230,6 +235,7 @@ class MemCacheComputation : public BackendComputation {
         }
         // Wait until the value is ready.
         lock->state.wait(CachedValue::WAITERS, std::memory_order_acquire);
+        LOGFILE << "State wait completed: for hash " << lock.GetKey();
         assert(lock->state.load(std::memory_order_acquire) ==
                CachedValue::READY);
         CachedValueToEvalResult(**lock, entry.result_ptr);
