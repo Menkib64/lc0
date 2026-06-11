@@ -637,9 +637,12 @@ __global__ void globalAvgPool_kernel(T* output, const T* input,
   }
 
 // Compute warp wide sum (for entire plane - elementsPerWarp elements).
+// offsets stay < 32 so each 32-lane subgroup reduces its own plane; only lane 0
+// of the subgroup (laneId==0) reads the result, so the down-shuffle's upper-half
+// reads are discarded and a 64-lane wavefront yields two correct plane sums.
 #pragma unroll
   for (int offset = 1; offset < 32; offset *= 2) {
-    S += __shfl_down_sync(0xFFFFFFFF, S, offset);
+    S += __shfl_down_sync(LC0_FULL_WARP_MASK, S, offset);
   }
 
   float avg = S / elementsPerWarp;
@@ -811,14 +814,14 @@ __global__ void softmax_opt_64_kernel(T* output, const T* input,
   }
   float threadMax = max(x[0], x[1]);
   float maxval = warpMax(threadMax);
-  maxval = __shfl_sync(0xFFFFFFFF, maxval, 0);
+  maxval = subgroupBroadcast0(maxval);
 
   ex[0] = exp(x[0] - maxval);
   ex[1] = exp(x[1] - maxval);
 
   float threadSum = ex[0] + ex[1];
   float Sum = warpReduce(threadSum);
-  Sum = __shfl_sync(0xFFFFFFFF, Sum, 0);
+  Sum = subgroupBroadcast0(Sum);
 
   ex[0] = ex[0] / Sum;
   ex[1] = ex[1] / Sum;
@@ -935,9 +938,17 @@ __global__ void layer_norm_kernel(int N, int C, T* output, const T* input,
                                   const T* betas, float ep, float alpha,
                                   ActivationFunction act) {
   int n = blockIdx.x * blockDim.z + threadIdx.z;
-  if (n >= N) return;
   int c = (threadIdx.y * 32 + threadIdx.x) * 16;
-  bool oobThread = c >= C;
+  // An out-of-range row (n >= N) must NOT early-return: shared_sum_for_layer_norm
+  // calls __syncthreads(), and on a 64-lane wavefront two threadIdx.z rows share
+  // one wavefront, so returning the padding row while its partner survives is a
+  // partial-wavefront barrier -> GPU fault on AMD (it is benign on NVIDIA only
+  // because whole 32-lane warps exit). Instead fold it into oobThread so the
+  // padding row skips every load/store (each guarded by !oobThread) yet still
+  // reaches both barriers. Padding rows own their own sum[threadIdx.z] slot, so
+  // valid rows are never corrupted. Arch-unified: identical results on NVIDIA.
+  bool oobThread = (c >= C) || (n >= N);
+  if (n >= N) n = N - 1;  // keep index arithmetic in-bounds; loads are guarded
 
   int biasIndex = c;
   int tensorIndex = n * C + c;

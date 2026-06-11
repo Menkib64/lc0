@@ -427,11 +427,32 @@ __device__ void OutputTransform_kernel(int N, int C, int se_K, T* output,
 #endif
 }
 
+// Shuffle participation mask. HIP requires a 64-bit mask (ROCm static_asserts
+// sizeof(mask)==8) AND asserts at runtime that the mask exactly equals the set
+// of active lanes (mask == __ballot(true)). A literal full mask therefore faults
+// whenever a block is not a whole multiple of the 64-lane wavefront (e.g.
+// layer_norm launches (32,1,z) blocks whose last wavefront is half-populated),
+// so use __activemask() -- it is exactly the active set on any wave size and in
+// any divergence state. CUDA keeps the 32-bit full-warp literal it has always
+// used (its warp is always 32 wide and fully active at these call sites).
+#if defined(USE_HIP)
+#define LC0_FULL_WARP_MASK (__activemask())
+#else
+#define LC0_FULL_WARP_MASK 0xFFFFFFFFu
+#endif
+
+// All warp reductions below combine exactly 32 lanes (the butterfly runs masks
+// 16..1, touching only bits 0-4), matching a 32-lane NVIDIA warp. On a 64-lane
+// CDNA wavefront the two 32-lane halves reduce independently, which is what the
+// per-32-channel data layout in the SE / softmax / avg-pool kernels expects.
+// Broadcasting the result therefore must read lane 0 OF THE 32-LANE SUBGROUP,
+// not lane 0 of the whole wavefront (see subgroupBroadcast).
+
 // fast reduction for the warp
 __device__ __forceinline__ float warpReduce(float x) {
 #pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1)
-    x += __shfl_xor_sync(0xFFFFFFFF, x, mask);
+    x += __shfl_xor_sync(LC0_FULL_WARP_MASK, x, mask);
 
   return x;
 }
@@ -440,9 +461,18 @@ __device__ __forceinline__ float warpReduce(float x) {
 __device__ __forceinline__ float warpMax(float x) {
 #pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1)
-    x = max(x, __shfl_xor_sync(0xFFFFFFFF, x, mask));
+    x = max(x, __shfl_xor_sync(LC0_FULL_WARP_MASK, x, mask));
 
   return x;
+}
+
+// Broadcast the value held by lane 0 of the caller's 32-lane subgroup to all
+// lanes of that subgroup. On NVIDIA (warp==32) this is a plain lane-0 broadcast.
+// On CDNA wave64 a width-32 shuffle keeps each 32-lane half independent, so the
+// upper half (a different data row) is not clobbered with the lower half's value
+// -- the wave64 softmax-broadcast correctness fix.
+__device__ __forceinline__ float subgroupBroadcast0(float x) {
+  return __shfl_sync(LC0_FULL_WARP_MASK, x, 0, 32);
 }
 
 // atomic max implementation for floats

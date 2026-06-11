@@ -150,9 +150,15 @@ struct InputsOutputs {
             cudaMemsetAsync(mem, 0, tensor_mem_size, compute_stream_));
       }
       ReportCUBLASErrors(cublasCreate(&cublas_));
+#if !defined(USE_HIP)
+      // No hipBLAS equivalent for the TF32/tensor-op math-mode toggle; hipBLAS
+      // picks its default precision (see network_cuda.cc constructor).
       ReportCUBLASErrors(cublasSetMathMode(
           cublas_, cublasDisableTensorCores ? CUBLAS_PEDANTIC_MATH
                                             : CUBLAS_TENSOR_OP_MATH));
+#else
+      (void)cublasDisableTensorCores;
+#endif
       ReportCUBLASErrors(cublasSetStream(cublas_, compute_stream_));
     } else {
       multi_stream_ = false;

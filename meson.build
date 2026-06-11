@@ -609,6 +609,86 @@ if get_option('build_backends')
     has_backends = true
   endif
 
+  ## ~~~~~
+  ## ROCm / HIP
+  ## ~~~~~
+  # Compile lc0's own CUDA backend kernels (.cu, kept in CUDA spelling) with
+  # hipcc behind src/neural/backends/cuda/hip_compat.h, mirroring the nvcc
+  # custom_target path above. Reuses the same hipBLAS / amdhip64 / amd_gfx
+  # discovery as -Dsycl=amd. cuDNN -> MIOpen and CUTLASS are out of scope, so
+  # network_cudnn.cc and cutlass_kernels.cu are not built here.
+  if get_option('hip')
+    hipcc = find_program('hipcc', '/opt/rocm/bin/hipcc', required: true)
+
+    hip_libdirs = get_option('hip_libdirs')
+    hip_args = []
+    foreach hip_include : get_option('hip_include')
+      if run_command('scripts/checkdir.py', hip_include, check : false).returncode() == 0
+        includes += include_directories(hip_include, is_system: true)
+        hip_args += '-I' + hip_include
+      endif
+    endforeach
+    deps += cc.find_library('hipblas', dirs: hip_libdirs, required: true)
+    cc.has_header('hipblas/hipblas.h', required: true, args: hip_args)
+    deps += cc.find_library('amdhip64', dirs: hip_libdirs, required: true)
+    cc.has_header('hip/hip_runtime.h', required: true, args: hip_args)
+
+    add_project_arguments('-DUSE_HIP', '-D__HIP_PLATFORM_AMD__', language : 'cpp')
+
+    # Resolve the target architecture: explicit -Damd_gfx wins, else autodetect
+    # via rocm_agent_enumerator, else default to gfx90a. The same source builds
+    # any AMD GPU architecture with only -Damd_gfx changed (no source edit).
+    hip_gfx = get_option('amd_gfx')
+    if hip_gfx == ''
+      agent_enum = find_program('rocm_agent_enumerator', '/opt/rocm/bin/rocm_agent_enumerator',
+                  required: false)
+      if agent_enum.found() and meson.version().version_compare('>=1.2.0')
+        agents = run_command(agent_enum, check : false).stdout()
+        foreach agent : agents.splitlines()
+          if hip_gfx == '' and agent.startswith('gfx') and agent != 'gfx000'
+            hip_gfx = agent
+          endif
+        endforeach
+      endif
+      if hip_gfx == ''
+        hip_gfx = 'gfx90a'
+        warning('Could not autodetect AMD GPU arch; defaulting to gfx90a. Set -Damd_gfx to override.')
+      endif
+      message('HIP target architecture: ' + hip_gfx)
+    endif
+
+    hipcc_compat = meson.current_source_dir() + '/src/neural/backends/cuda/hip_compat.h'
+    # -fPIC is invalid for x86_64-pc-windows-msvc (clang rejects it on Windows)
+    hipcc_fpic = host_machine.system() != 'windows' ? ['-fPIC'] : []
+    hipcc_args = ['--offload-arch=' + hip_gfx, '-x', 'hip', '-std=c++17'] + hipcc_fpic + [
+                  '-O3', '-DUSE_HIP', '-D__HIP_PLATFORM_AMD__',
+                  '-I', meson.current_source_dir() + '/src',
+                  '-I', meson.current_source_dir() + '/third_party',
+                  '-include', hipcc_compat]
+    hipcc_args += hip_args
+    hipcc_io_args = ['-c', '@INPUT@', '-o', '@OUTPUT@']
+
+    cuda_files = ['src/neural/backends/cuda/layers.cc',
+                  'src/neural/backends/cuda/network_cuda.cc']
+    includes += include_directories('src/neural/backends/cuda/')
+    files += cuda_files
+
+    files += custom_target('hip fp32 code',
+      input : 'src/neural/backends/cuda/common_kernels.cu',
+      output : 'common_kernels.hip.o',
+      depend_files: 'src/neural/backends/cuda/winograd_helper.inc',
+      command : [hipcc, hipcc_args, hipcc_io_args]
+    )
+
+    files += custom_target('hip fp16 code',
+      input : 'src/neural/backends/cuda/fp16_kernels.cu',
+      output : 'fp16_kernels.hip.o',
+      depend_files: 'src/neural/backends/cuda/winograd_helper.inc',
+      command : [hipcc, hipcc_args, hipcc_io_args]
+    )
+    has_backends = true
+  endif
+
   ## ~~~~~~~~
   ## DirectX
   ## ~~~~~~~~

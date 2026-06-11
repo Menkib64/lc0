@@ -26,7 +26,9 @@
 */
 #pragma once
 
+#if !defined(USE_HIP)
 #include <cublas_v2.h>
+#endif
 
 #include <cstddef>
 #include <memory>

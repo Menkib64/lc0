@@ -452,6 +452,9 @@ void OutputInputTransform(int N, int C, int se_K, T* output, const T* input,
     // and only for fp16.
     if (C <= kMaxResBlockFusingSeKFp16Ampere) {
       cudaFuncSetAttribute(
+#if defined(USE_HIP)
+          (const void*)
+#endif
           OutputInputTransformKernel_fp16_shmem_board<activation, use_bias,
                                                       use_skip>,
           cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * C * sizeof(half));

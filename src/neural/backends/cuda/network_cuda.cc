@@ -258,6 +258,13 @@ class CudaNetwork : public Network {
     constexpr bool fp16 = std::is_same<half, DataType>::value;
 
     if (fp16) {
+#if defined(USE_HIP)
+      // hipDeviceProp_t.major/minor do not follow CUDA SM numbering, so the SM
+      // checks below misfire. Every ROCm GPU lc0 targets (gfx9 CDNA and gfx10/11
+      // RDNA) has native FP16 with matrix acceleration (MFMA / WMMA), so enable
+      // the FP16 path and the tensor-core math unconditionally.
+      has_tensor_cores_ = true;
+#else
       // Check if the GPU support FP16.
 
       if ((deviceProp.major == 6 && deviceProp.minor != 1) ||
@@ -275,6 +282,7 @@ class CudaNetwork : public Network {
       } else {
         throw Exception("Your GPU doesn't support FP16");
       }
+#endif
     }
 
     if (!multi_stream_) {
@@ -288,6 +296,10 @@ class CudaNetwork : public Network {
                                                 cudaEventDisableTiming));
       ReportCUBLASErrors(cublasCreate(&cublas_));
       ReportCUBLASErrors(cublasSetStream(cublas_, compute_stream_));
+#if !defined(USE_HIP)
+      // The CUBLAS_TENSOR_OP_MATH / CUBLAS_PEDANTIC_MATH enums (a NVIDIA
+      // TF32/tensor-op math-mode toggle and a TU11x workaround) have no hipBLAS
+      // equivalent; let hipBLAS pick its default precision.
       if (has_tensor_cores_)
         ReportCUBLASErrors(cublasSetMathMode(
             cublas_,
@@ -299,6 +311,7 @@ class CudaNetwork : public Network {
                                      // avoid cublas bug of making use of tensor
                                      // core math on TU11x GPUs that don't
                                      // support it.
+#endif
     }
 
     const int kNumInputPlanes = kInputPlanes;
@@ -343,11 +356,15 @@ class CudaNetwork : public Network {
     }
 
     bool use_fused_mha = false;
+#if !defined(USE_HIP)
+    // The fused-MHA kernel is CUTLASS-only (USE_CUTLASS), which does not build on
+    // ROCm; HIP always takes the cuBLAS attention fallback, so keep this false.
     if (deviceProp.major >= 8 && fp16) {
       use_fused_mha = options.GetOrDefault<bool>(
           "fused_mha", file.format().network_format().ffn_activation() !=
                            pblczero::NetworkFormat::ACTIVATION_RELU_2);
     }
+#endif
 
     const bool use_gemm_ex = deviceProp.major >= 5;
 
@@ -1349,8 +1366,16 @@ std::unique_ptr<Network> MakeCudaNetworkAuto(
   return MakeCudaNetwork<float>(weights, options);
 }
 
+#if defined(USE_HIP)
+// Register the ROCm/HIP build under distinct names so it never collides with a
+// real CUDA backend on a dual-stack box. lc0's own CUDA kernels run via hipcc.
+REGISTER_NETWORK("hip-auto", MakeCudaNetworkAuto, 104)
+REGISTER_NETWORK("hip", MakeCudaNetwork<float>, 103)
+REGISTER_NETWORK("hip-fp16", MakeCudaNetwork<half>, 102)
+#else
 REGISTER_NETWORK("cuda-auto", MakeCudaNetworkAuto, 104)
 REGISTER_NETWORK("cuda", MakeCudaNetwork<float>, 103)
 REGISTER_NETWORK("cuda-fp16", MakeCudaNetwork<half>, 102)
+#endif
 
 }  // namespace lczero

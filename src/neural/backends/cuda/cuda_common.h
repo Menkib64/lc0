@@ -26,9 +26,13 @@
 */
 #pragma once
 
+#if defined(USE_HIP)
+#include "hip_compat.h"
+#else
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
 
 #include "utils/fp16_utils.h"
 
@@ -38,7 +42,7 @@
 typedef void* cudnnHandle_t;
 #endif
 
-#if CUBLAS_VER_MAJOR < 11
+#if !defined(USE_HIP) && CUBLAS_VER_MAJOR < 11
 #define CUBLAS_PEDANTIC_MATH CUBLAS_DEFAULT_MATH
 #endif
 
