@@ -153,7 +153,7 @@ class MemCacheComputation : public BackendComputation {
       while (state == CachedValue::NOT_QUEUED) {
         if (lock->state.compare_exchange_weak(state, CachedValue::NO_WAITERS,
                                               std::memory_order_acq_rel)) {
-          CERR << "Set state to NO_WAITERS for hash " << hash;
+          LOGFILE << "Set state to NO_WAITERS for hash " << hash;
           to_be_queued = true;
           break;
         }
@@ -212,7 +212,7 @@ class MemCacheComputation : public BackendComputation {
           LOGFILE << "Setting state to READY for hash " << lock.GetKey();
           auto state = lock->state.exchange(CachedValue::READY,
                                             std::memory_order_release);
-          LOGFILE << "Setting state was " << state << " for hash " << lock.GetKey();
+          LOGFILE << "State was " << state << " for hash " << lock.GetKey();
           // Wake up waiters if there are any,
           if (state == CachedValue::WAITERS) {
             lock->state.notify_all();

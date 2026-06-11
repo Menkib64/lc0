@@ -538,6 +538,16 @@ void OnnxComputation<DataType>::CaptureCudaGraph(std::unique_lock<std::mutex>&& 
 }
 #endif
 
+std::ostream& operator<<(std::ostream& os, const std::mutex& mutex) {
+  const intptr_t* m = reinterpret_cast<const intptr_t*>(&mutex);
+  os << std::hex;
+  for (size_t i = 0; i < sizeof(std::mutex) / sizeof(intptr_t); i++) {
+    os << m[i] << " ";
+  }
+  os << std::dec;
+  return os;
+}
+
 template <typename DataType>
 void OnnxComputation<DataType>::ComputeBlocking() {
   LCTRACE_FUNCTION_SCOPE;
@@ -549,7 +559,9 @@ void OnnxComputation<DataType>::ComputeBlocking() {
     assert(GetBatchSize() > 0);
     bool new_capture = false;
     {
-      LOGFILE << "ComputeBlocking: Taking lock for " << inputs_outputs_;
+      std::ostringstream oss;
+      oss << network_->lock_;
+      LOGFILE << "ComputeBlocking: Taking lock for " << std::hex << inputs_outputs_ << " network: " << network_ << " mutex: " << &network_->lock_ << " :" << oss.str();
       std::unique_lock lock(network_->lock_);
       LOGFILE << "ComputeBlocking: Checking for graph for " << inputs_outputs_ << " batch size " << GetBatchSize();
       cudaGraphExec_t& graph =
