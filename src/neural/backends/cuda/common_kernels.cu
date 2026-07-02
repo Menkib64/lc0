@@ -32,6 +32,14 @@
 #include "neural/tables/activation_function.h"
 #include "neural/tables/attention_policy_map.h"
 #include "utils/exception.h"
+
+// This translation unit only instantiates the fp32 winograd transforms, which
+// are valid on every architecture, so enable the shared transform bodies
+// unconditionally. (fp16_kernels.cu gates the same bodies on native fp16
+// support because it instantiates the half versions.)
+#ifndef HAS_FP16_SUPPORT
+#define HAS_FP16_SUPPORT 1
+#endif
 #include "winograd_helper.inc"
 
 namespace lczero {

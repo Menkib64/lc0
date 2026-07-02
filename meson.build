@@ -636,8 +636,8 @@ if get_option('build_backends')
     add_project_arguments('-DUSE_HIP', '-D__HIP_PLATFORM_AMD__', language : 'cpp')
 
     # Resolve the target architecture: explicit -Damd_gfx wins, else autodetect
-    # via rocm_agent_enumerator, else default to gfx90a. The same source builds
-    # any AMD GPU architecture with only -Damd_gfx changed (no source edit).
+    # via rocm_agent_enumerator. The same source builds any AMD GPU architecture
+    # with only -Damd_gfx changed (no source edit).
     hip_gfx = get_option('amd_gfx')
     if hip_gfx == ''
       agent_enum = find_program('rocm_agent_enumerator', '/opt/rocm/bin/rocm_agent_enumerator',
@@ -651,8 +651,7 @@ if get_option('build_backends')
         endforeach
       endif
       if hip_gfx == ''
-        hip_gfx = 'gfx90a'
-        warning('Could not autodetect AMD GPU arch; defaulting to gfx90a. Set -Damd_gfx to override.')
+        error('Could not autodetect an AMD GPU architecture. Set -Damd_gfx explicitly, e.g. -Damd_gfx=gfx90a.')
       endif
       message('HIP target architecture: ' + hip_gfx)
     endif
@@ -660,7 +659,7 @@ if get_option('build_backends')
     hipcc_compat = meson.current_source_dir() + '/src/neural/backends/cuda/hip_compat.h'
     # -fPIC is invalid for x86_64-pc-windows-msvc (clang rejects it on Windows)
     hipcc_fpic = host_machine.system() != 'windows' ? ['-fPIC'] : []
-    hipcc_args = ['--offload-arch=' + hip_gfx, '-x', 'hip', '-std=c++17'] + hipcc_fpic + [
+    hipcc_args = ['--offload-arch=' + hip_gfx, '-x', 'hip', '-std=c++20'] + hipcc_fpic + [
                   '-O3', '-DUSE_HIP', '-D__HIP_PLATFORM_AMD__',
                   '-I', meson.current_source_dir() + '/src',
                   '-I', meson.current_source_dir() + '/third_party',

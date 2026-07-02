@@ -81,7 +81,7 @@ __device__ __forceinline__ float activate(float cVal,
 template <typename T, int M, int N, int K>
 __device__ __forceinline__ void matrixMul_gpu_serial(T* c, const T* a,
                                                      const T* b) {
-#ifndef SKIP_FP16_BITS
+#ifdef HAS_FP16_SUPPORT
 #pragma unroll
   for (int i = 0; i < M; ++i)
 #pragma unroll
@@ -305,7 +305,7 @@ __device__ void OutputTransform_kernel(int N, int C, int se_K, T* output,
                                        const T* input, const T* skip,
                                        const T* bias, const T* w1, const T* b1,
                                        const T* w2, const T* b2) {
-#ifndef SKIP_FP16_BITS
+#ifdef HAS_FP16_SUPPORT
   const bool fp16 = std::is_same<half, T>::value;
 
   int k = threadIdx.x;
@@ -511,7 +511,7 @@ __global__ __launch_bounds__(
                                                           const T* b1,
                                                           const T* w2,
                                                           const T* b2) {
-#ifndef SKIP_FP16_BITS
+#ifdef HAS_FP16_SUPPORT
   const bool fp16 = std::is_same<half, T>::value;
 
   int k = threadIdx.x;
@@ -721,7 +721,7 @@ __global__ __launch_bounds__(
     4) void OutputTransform_relu_InputTransform_kernel(int N, int C, T* output,
                                                        const T* input, T* skip,
                                                        const T* bias) {
-#ifndef SKIP_FP16_BITS
+#ifdef HAS_FP16_SUPPORT
   const bool fp16 = std::is_same<half, T>::value;
 
   int k = threadIdx.x + blockIdx.x * kOpInpTransformBlockSize;

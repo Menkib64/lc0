@@ -51,7 +51,8 @@ Given those basics, the OS and backend specific instructions are below.
 
 1. Install backend (also read the detailed instructions in later sections):
     - If you want to use NVidia graphics cards Install [CUDA](https://developer.nvidia.com/cuda-zone) (and optionally [cuDNN](https://developer.nvidia.com/cudnn)).
-    - If you want to use AMD graphics cards install [ROCm](https://rocm.docs.amd.com/) and build with the HIP backend; AMD and Intel cards can also use SYCL.
+    - If you want to use AMD graphics cards install [ROCm](https://rocm.docs.amd.com/) and build with the HIP backend.
+    - If you want to use Intel graphics cards you can try SYCL.
     - if you want BLAS install either OpenBLAS or DNNL.
 2. Install ninja build (`ninja-build`), meson, and (optionally) gtest (`libgtest-dev`).
 3. Go to `lc0/`

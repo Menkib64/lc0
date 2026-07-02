@@ -38,26 +38,12 @@
 #include <hipblas/hipblas.h>
 
 // fp16_kernels.cu and the fp16 bodies in winograd_helper.inc gate their device
-// code on `__CUDA_ARCH__ >= 530` (and skip them when `__CUDA_ARCH__ < 530`), the
-// NVIDIA way of saying "this GPU has native fp16". hipcc never defines
-// __CUDA_ARCH__ (it uses __HIP_DEVICE_COMPILE__), so without this every fp16 SE /
-// fused conv-transform kernel would compile to an empty body on HIP and leave its
-// output uninitialized. gfx90a has native fp16 + MFMA, so those bodies are correct
-// to compile in; 800 is an arbitrary value >= 530.
-//
-// This is defined only in the device pass and only AFTER <hip/hip_runtime.h>: HIP
-// itself derives __HIP_DEVICE_COMPILE__ from __CUDA_ARCH__ in hip_common.h, so an
-// unconditional or pre-include define would wrongly mark the HOST pass as a device
-// compile. By the time we get here HIP has already set __HIP_DEVICE_COMPILE__, so
-// gating on it confines __CUDA_ARCH__ to the device pass. The only __CUDA_ARCH__
-// readers reachable from the two HIP-compiled .cu are exactly these fp16 gates (no
-// PTX, sm-specific intrinsic, or other arch branch), so this does not activate any
-// NVIDIA-only path.
-#if defined(__HIP_DEVICE_COMPILE__) && __HIP_DEVICE_COMPILE__
-#ifndef __CUDA_ARCH__
-#define __CUDA_ARCH__ 800
-#endif
-#endif
+// code on HAS_FP16_SUPPORT. The NVIDIA build defines it only for compute
+// capability >= 5.3, where native fp16 arithmetic exists. Every AMD GPU that ROCm
+// targets has native fp16 (GCN 5.0 / gfx900 and newer), so define it
+// unconditionally here. Without it those fp16 SE / fused conv-transform kernels
+// would compile to empty bodies and leave their output uninitialized.
+#define HAS_FP16_SUPPORT 1
 
 // Deliberately report a pre-11.0 CUDA runtime so every `CUDART_VERSION >= 11000`
 // / `>= 11010` block in the backend (NVIDIA L2-persistence cache hints, CUDA
