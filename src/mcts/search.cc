@@ -1307,14 +1307,14 @@ void SearchWorker::ExecuteOneIteration() {
   // 1. Initialize internal structures.
   size_t time_remaining =
       latest_time_manager_hints_.GetEstimatedRemainingTimeMs();
-  if (time_remaining >= 1000000000000) {
+  if (time_remaining >= 100000000000) {
     // Reimaining time is calculate when calling ShouldStop. The call happens
     // only after the first batch. Default to no time left for the first batch.
     time_remaining = 0;
   }
   size_t minibatch_adjustment = 1;
   if (params_.GetAdjustMiniBatchSize()) {
-    minibatch_adjustment = std::bit_width(time_remaining / 1024) / 2 + 1;
+    minibatch_adjustment = std::clamp(std::bit_width(time_remaining / 1024) / 2, 1, 8);
   }
   InitializeIteration(search_->network_->NewComputation(time_remaining));
 
