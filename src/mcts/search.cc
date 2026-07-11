@@ -1314,7 +1314,7 @@ void SearchWorker::ExecuteOneIteration() {
   }
   size_t minibatch_adjustment = 1;
   if (params_.GetAdjustMiniBatchSize()) {
-    minibatch_adjustment = std::clamp(std::bit_width(time_remaining / 1024) / 2, 1, 8);
+    minibatch_adjustment = std::clamp(static_cast<int>(std::bit_width(time_remaining / 1024) / 2), 1, 8);
   }
   InitializeIteration(search_->network_->NewComputation(time_remaining));
 
