@@ -764,9 +764,23 @@ OnnxNetwork::OnnxNetwork(const WeightsFile& file, const OptionsDict& opts,
       CERR << "GPU SM count: " << deviceProp.multiProcessorCount;
       max_batch_size_ = opt_batch_size_ = deviceProp.multiProcessorCount;
     }
-#if CUDART_VERSION >= 12080
+    auto print_cuda_version = [](int version) {
+      int major = version / 1000;
+      int minor = (version - major * 1000) / 10;
+      int patch = version - major * 1000 - minor * 10;
+      return std::to_string(major) + "." + std::to_string(minor) + "." +
+             std::to_string(patch);
+    };
+    int build_version = CUDART_VERSION;
     int runtime_version;
     ReportCUDAErrors(cudaRuntimeGetVersion(&runtime_version));
+    int driver_version;
+    ReportCUDAErrors(cudaDriverGetVersion(&driver_version));
+    CERR << "CUDA build version: " << print_cuda_version(build_version);
+    CERR << "CUDA runtime version: " << print_cuda_version(runtime_version);
+    CERR << "CUDA driver version: " << print_cuda_version(driver_version);
+
+#if CUDART_VERSION >= 12080
     if (runtime_version >= 12080) {
       int attr;
       ReportCUDAErrors(
