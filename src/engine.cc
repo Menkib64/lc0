@@ -164,7 +164,7 @@ void Engine::EnsureSearchStopped() {
 
 namespace {
 int RandomHang() {
-  if (Random::Get().GetFloat(1.0f) < 0.2) return 0;
+  if (Random::Get().GetFloat(1.0f) < 0.9) return 0;
   std::this_thread::sleep_for(std::chrono::seconds(120));
   return 1;
 }
