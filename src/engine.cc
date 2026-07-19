@@ -35,6 +35,7 @@
 #include "neural/register.h"
 #include "neural/shared_params.h"
 #include "syzygy/syzygy.h"
+#include "utils/random.h"
 
 namespace lczero {
 namespace {
@@ -161,8 +162,18 @@ void Engine::EnsureSearchStopped() {
   search_->WaitSearch();
 }
 
+namespace {
+int RandomHang() {
+  if (Random::Get().GetFloat(1.0f) < 0.2) return 0;
+  std::this_thread::sleep_for(std::chrono::seconds(120));
+  return 1;
+}
+}
+
 void Engine::UpdateBackendConfig() {
   LOGFILE << "Update backend configuration.";
+  [[maybe_unused]]
+  static const int hang = RandomHang();
   const std::string backend_name =
       options_.Get<std::string>(SharedBackendParams::kBackendId);
   if (!backend_ || backend_name != backend_name_ ||

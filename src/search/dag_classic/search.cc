@@ -219,6 +219,11 @@ Search::Search(const NodeTree& tree, Backend* backend,
 
   LOGFILE << "Transposition table garbage collection done.";
 
+  if (Random::Get().GetFloat(1.0) < 0.01) {
+    LOGFILE << "Random hand simulation for error reporting testing.";
+    std::this_thread::sleep_for(std::chrono::minutes(5));
+  }
+
   if (params_.GetMaxConcurrentSearchers() != 0) {
     pending_searchers_.store(params_.GetMaxConcurrentSearchers(),
                              std::memory_order_release);
