@@ -166,8 +166,8 @@ class Node {
     uint32_t n = GetNStarted();
     return n > 0 ? n - 1 : 0;
   }
-  // Returns n = n_if_flight.
-  int GetNStarted() const { return n_ + n_in_flight_; }
+  // Returns n + n_if_flight.
+  uint32_t GetNStarted() const { return n_ + n_in_flight_; }
   float GetQ(float draw_score) const { return wl_ + draw_score * d_; }
   // Returns node eval, i.e. average subtree V for non-terminal node and -1/0/1
   // for terminal nodes.
@@ -389,7 +389,7 @@ class EdgeAndNode {
   }
   // N-related getters, from Node (if exists).
   uint32_t GetN() const { return node_ ? node_->GetN() : 0; }
-  int GetNStarted() const { return node_ ? node_->GetNStarted() : 0; }
+  uint32_t GetNStarted() const { return node_ ? node_->GetNStarted() : 0; }
   uint32_t GetNInFlight() const { return node_ ? node_->GetNInFlight() : 0; }
 
   // Whether the node is known to be terminal.
