@@ -162,7 +162,10 @@ class Node {
   float GetVisitedPolicy() const;
   uint32_t GetN() const { return n_; }
   uint32_t GetNInFlight() const { return n_in_flight_; }
-  uint32_t GetChildrenVisits() const { return n_ > 0 ? n_ - 1 : 0; }
+  uint32_t GetChildrenVisits() const {
+    uint32_t n = GetNStarted();
+    return n > 0 ? n - 1 : 0;
+  }
   // Returns n = n_if_flight.
   int GetNStarted() const { return n_ + n_in_flight_; }
   float GetQ(float draw_score) const { return wl_ + draw_score * d_; }
