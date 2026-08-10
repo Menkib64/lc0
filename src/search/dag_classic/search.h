@@ -543,7 +543,25 @@ class SearchWorker {
     void DoTask(int) override;
   };
 
- private:
+  // Tasks to output uci info when it is least likely to cause task worker slow
+  // down.
+  class MaybeOutputInfoTask final : public TaskQueue::PickTask {
+   public:
+    explicit MaybeOutputInfoTask(SearchWorker& worker) : worker_(worker) {}
+
+    void Wait(int tid) const override;
+    void Reset(int tid, int task_workers);
+
+   private:
+    void DoTask(int) override;
+
+   private:
+    SearchWorker& worker_;
+    int worker_id_ = -1;
+    int task_workers_ = 0;
+    std::atomic<int> done_{0};
+  };
+
   // TODO: Is there false sharing issues when inserting to AtomicVector?
   struct CollisionNode {
     // The path to the node to extend.
@@ -627,6 +645,7 @@ class SearchWorker {
         : is_black_to_move(history.IsBlackToMove()) {}
   };
 
+ private:
   NodeToProcess PickNodeToExtend(int collision_limit);
   // Adjust parameters for updating node @n and its parent low node if node is
   // terminal or its child low node is a transposition. Also update bounds and
@@ -653,17 +672,21 @@ class SearchWorker {
   bool ShouldStopPickingHere(Node* node, bool is_root_node, int repetitions);
   void ExtendNode(NodeToProcess& picked_node, const BackupPath& path,
                   const PositionHistory& history);
-  void FetchSingleNodeResult(NodeToProcess* node_to_process,
+ public:
+  void FetchSingleNodeResult(const NodeToProcess* node_to_process,
                              const BackupPath& path);
   // Process a queued task.
- public:
   void ProcessTask(int tid);
+  template <typename TaskType>
+  void SubmitTasks(const TaskType& task);
  private:
   void WaitForTasks();
 
+ public:
   // Helpers to lookup picked node paths.
   const BackupPath& GetMinibatchPath(int index) const;
   const BackupPath& GetOutOfOrderPath(int index) const;
+ private:
   const BackupPath& GetCollisionPath(int index) const;
   // Helpers to assign picked node paths.
   void AssignMinibatchPath(int index, const BackupPath& path);
