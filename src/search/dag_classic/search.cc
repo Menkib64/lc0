@@ -2177,6 +2177,35 @@ void SolidifyCandidates(SearchWorker& worker, SearchCachedState& state, int tid,
   candidates.clear();
   candidates.reserve(capacity);
 }
+
+class ResetComputationTask final : public TaskQueue::PickTask {
+ public:
+  ResetComputationTask(SearchWorker& worker,
+                       std::unique_ptr<BackendComputation>&& computation)
+      : worker_(worker), computation_(std::move(computation)) {}
+
+  void Wait(int tid) const override {
+    while (done_.load(std::memory_order_acquire) == 0) {
+      worker_.ProcessTask(tid);
+    }
+  }
+
+ private:
+  void DoTask(int tid) override {
+    ResetComputation(tid);
+    done_.store(1, std::memory_order_release);
+  }
+
+  void ResetComputation(int) {
+    LCTRACE_FUNCTION_SCOPE;
+    computation_.reset();
+  }
+
+ private:
+  SearchWorker& worker_;
+  std::unique_ptr<BackendComputation> computation_;
+  std::atomic<int> done_{0};
+};
 }  // namespace
 
 void SearchWorker::RunBlocking() {
@@ -2224,6 +2253,9 @@ bool SearchWorker::ExecuteOneIteration() {
   // 5. Retrieve NN computations (and terminal values) into nodes.
   FetchMinibatchResults();
 
+  ResetComputationTask reset_task(*this, std::move(computation_));
+  search_->state_.task_queue_.SubmitTask(reset_task, tid_);
+
   // 6. Propagate the new nodes' information to all their parents in the tree.
   bool work_done = DoBackupUpdate();
 
@@ -2244,6 +2276,8 @@ bool SearchWorker::ExecuteOneIteration() {
       }
     }
   }
+  // Wait for th reset task to complete before starting a new iteration.
+  reset_task.Wait(tid_);
   return false;
 }
 
