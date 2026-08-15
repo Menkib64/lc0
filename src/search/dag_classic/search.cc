@@ -170,9 +170,9 @@ std::pair<int, int> GetRepetitions(int depth, const Position& position,
 
   if (repetitions == 0) return {0, 0};
 
-  if (repetitions >= 2) return {repetitions, 0};
-
   const auto plies = position.GetPliesSincePrevRepetition();
+  if (repetitions >= 2) return {repetitions, plies};
+
   if (params.GetTwoFoldDraws() && /*repetitions == 1 &&*/ depth >= 4 &&
       depth >= plies) {
     return {1, plies};
@@ -3571,6 +3571,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   double v = 0.0;
   double d = 0.0;
   float m = 0.0f;
+  int m_since_repetition = 0;
   double weight_to_fix = 0.0f;
   double v_delta = 0.0;
   double d_delta = 0.0;
@@ -3600,6 +3601,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       v = 0.0;
       d = 1.0;
       m = nr >= 2 ? 0.0f : nm;
+      m_since_repetition = nm;
       if (node_to_process.nn_queried) {
         // Adjust NN evaluation to match the repetition evaluation.
         avg_weight = std::min(avg_weight, nl->GetWeight());
@@ -3611,6 +3613,10 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       } else {
         // Update low node evaluation for the repetition.
         nl->FinalizeScoreUpdate(v, d, m, avg_weight);
+      }
+      if (nr > 1 && nm >= static_cast<int>(path.size()) && !nl->IsTerminal()) {
+        // Draw by repetition cannot be avoided anymore.
+        nl->MakeTerminal(GameResult::DRAW, m);
       }
     } else {
       avg_weight = std::min(avg_weight, nl->GetWeight());
@@ -3674,11 +3680,23 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       v = pl->GetWL();
       d = pl->GetD();
       m = pl->GetM();
-      weight_to_fix = 0.0f;
+      weight_to_fix = 0.0;
     }
     divisor = pl->FinalizeScoreUpdate(v, d, m, avg_weight);
     if (weight_to_fix > 0) {
       pl->AdjustForTerminal(v_delta, d_delta, m_delta, divisor, weight_to_fix);
+    }
+    // The first visit to a repetition should be treated as a draw. To make sure
+    // path specific evaluation accounts for the repetition later in the search.
+    if (m_since_repetition > 0 && --m_since_repetition == 0 && !pl->IsTerminal()) {
+      v = 0.0;
+      d = 1.0;
+      m = std::get<2>(path.back()) *
+          (std::get<1>(path.back()) == 1 ? 2.0f : 1.0f);
+      pl->FinalizeScoreUpdate(v, d, m,
+                              params_.GetUseUncertaintyWeighting()
+                                  ? params_.GetUncertaintyWeightingCap()
+                                  : 1.0);
     }
 
     node_lock = std::unique_lock<MutexType>(p->GetMutex());
