@@ -3608,7 +3608,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
         m_delta = m - nl->GetM();
         nl->AdjustForTerminal(v_delta, d_delta, m_delta, 1.0 / avg_weight,
                               avg_weight);
-      } else {
+      } else if (!nl->IsTerminal()) {
         // Update low node evaluation for the repetition.
         nl->FinalizeScoreUpdate(v, d, m, avg_weight);
       }
