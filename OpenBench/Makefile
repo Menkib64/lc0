@@ -2,7 +2,7 @@ ifndef EXE
 	EXE = $(CURDIR)/lc0
 endif
 
-BUILD_FLAGS =
+BUILD_FLAGS = debugoptimized
 ifdef EVALFILE
 	BUILD_FLAGS += -Dembed=true
 endif
@@ -20,5 +20,5 @@ endif
 .PHONY: all
 all:
 	chmod +x ../build.sh
-	../build.sh $(BUILD_FLAGS) && mv ../build/release/lc0 $(EXE)
+	../build.sh $(BUILD_FLAGS) && mv ../build/debugoptimized/lc0 $(EXE)
 	$(POST_BUILD_COMMANDS)
