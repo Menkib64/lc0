@@ -170,9 +170,9 @@ std::pair<int, int> GetRepetitions(int depth, const Position& position,
 
   if (repetitions == 0) return {0, 0};
 
-  if (repetitions >= 2) return {repetitions, 0};
-
   const auto plies = position.GetPliesSincePrevRepetition();
+  if (repetitions >= 2) return {repetitions, plies};
+
   if (params.GetTwoFoldDraws() && /*repetitions == 1 &&*/ depth >= 4 &&
       depth >= plies) {
     return {1, plies};
@@ -3575,10 +3575,13 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   double v_delta = 0.0;
   double d_delta = 0.0;
   float m_delta = 0.0f;
+  auto it = path.crbegin();
 
   double avg_weight = params_.GetUseUncertaintyWeighting()
                           ? params_.GetUncertaintyWeightingCap()
                           : 1.0;
+
+  assert(nl || n->IsTerminal());
 
   // Update the low node at the start of the backup path first, but only visit
   // it the first time that backup sees it.
@@ -3599,29 +3602,30 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     if (nr > 0) {
       v = 0.0;
       d = 1.0;
-      m = nr >= 2 ? 0.0f : nm;
-      if (node_to_process.nn_queried) {
-        // Adjust NN evaluation to match the repetition evaluation.
-        avg_weight = std::min(avg_weight, nl->GetWeight());
-        v_delta = v - nl->GetWL();
-        d_delta = d - nl->GetD();
-        m_delta = m - nl->GetM();
-        nl->AdjustForTerminal(v_delta, d_delta, m_delta, 1.0 / avg_weight,
-                              avg_weight);
+      if (nr > 1 && nm >= static_cast<int>(path.size())) {
+        nl->FinalizeScoreUpdate(v, d, 0, avg_weight);
+        // Draw by repetition cannot be avoided anymore.
+        nl->MakeTerminal(GameResult::DRAW, 0);
       } else {
-        // Update low node evaluation for the repetition.
-        nl->FinalizeScoreUpdate(v, d, m, avg_weight);
+        low_lock.unlock();
+        // Skip updates before after the first visit to the repetition node.
+        for (int i = 0; i < std::min<int>(nm, path.size()); ++i, ++it) {
+          std::get<0>(*it)->CancelScoreUpdate(1);
+        }
+        std::tie(n, nr, nm) = *it;
+        low_lock = std::unique_lock<MutexType>(n->GetLowNode()->GetMutex());
+        m = std::get<2>(path.back()) *
+            (std::get<1>(path.back()) == 1 ? 2.0f : 1.0f);
+        n->GetLowNode()->FinalizeScoreUpdate(v, d, m, avg_weight);
       }
     } else {
       avg_weight = std::min(avg_weight, nl->GetWeight());
     }
   }
 
-  assert(nl || n->IsTerminal());
-
-  if (!MaybeAdjustForTerminalOrTransposition(n, nl, v, d, m, weight_to_fix,
-                                             v_delta, d_delta, m_delta,
-                                             update_parent_bounds)) {
+  if (!MaybeAdjustForTerminalOrTransposition(n, n->GetLowNode(), v, d, m,
+                                             weight_to_fix, v_delta, d_delta,
+                                             m_delta, update_parent_bounds)) {
     if (nr > 0) {
       m = m + 1;
     } else {
@@ -3637,7 +3641,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   }
 
   // Backup V value up to a root. After 1 visit, V = Q.
-  for (auto it = path.crbegin(); it != path.crend();
+  for (; it != path.crend();
        /* ++it in the body */) {
     auto divisor = n->FinalizeScoreUpdate(v, d, m, avg_weight);
     if (weight_to_fix > 0 && !n->IsTerminal()) {
@@ -3674,7 +3678,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       v = pl->GetWL();
       d = pl->GetD();
       m = pl->GetM();
-      weight_to_fix = 0.0f;
+      weight_to_fix = 0.0;
     }
     divisor = pl->FinalizeScoreUpdate(v, d, m, avg_weight);
     if (weight_to_fix > 0) {
