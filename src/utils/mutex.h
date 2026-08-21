@@ -185,33 +185,18 @@ class CAPABILITY("mutex") SpinMutex {
 #endif
       return;
     }
-    SpinMutexSlowLock();
-  }
-  void unlock() RELEASE() {
-#if TSAN_BUILD
-    __tsan_mutex_pre_unlock(&mutex_, 0);
-#endif
-    mutex_.store(0, std::memory_order_release);
-#if TSAN_BUILD
-    __tsan_mutex_post_unlock(&mutex_, 0);
-#endif
-  }
-
- private:
-  void SpinMutexSlowLock() {
     // Slow contention path. We use random spin count with occasional yield to
     // avoid starvation.
     unsigned spins = 0;
-    const auto tp = std::chrono::high_resolution_clock::now();
-    const auto ticks = tp.time_since_epoch().count();
-    const auto nowhash = std::hash<std::remove_cv_t<decltype(ticks)>>{}(ticks);
-    const auto tidhash =
-        std::hash<std::thread::id>{}(std::this_thread::get_id());
-    const auto hash = nowhash ^ tidhash;
+    const auto get_spin_count = []() {
+      const auto hash =
+          std::hash<std::thread::id>{}(std::this_thread::get_id());
+      const unsigned min_spins = 512;
+      const unsigned max_spins = min_spins + 1024;
+      return min_spins + (hash % (max_spins - min_spins));
+    };
 
-    const unsigned min_spins = 512;
-    const unsigned max_spins = min_spins + 1024;
-    const unsigned spin_count = min_spins + (hash % (max_spins - min_spins));
+    static const thread_local unsigned spin_count = get_spin_count();
 
     while (true) {
       int val = 0;
@@ -232,7 +217,17 @@ class CAPABILITY("mutex") SpinMutex {
       }
     }
   }
+  void unlock() RELEASE() {
+#if TSAN_BUILD
+    __tsan_mutex_pre_unlock(&mutex_, 0);
+#endif
+    mutex_.store(0, std::memory_order_release);
+#if TSAN_BUILD
+    __tsan_mutex_post_unlock(&mutex_, 0);
+#endif
+  }
 
+ private:
   std::atomic<int> mutex_{0};
 };
 
