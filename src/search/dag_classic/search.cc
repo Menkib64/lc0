@@ -3552,10 +3552,10 @@ bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
     } else {
       auto [lower, upper] = nl->GetBounds();
       auto [cur_lower, cur_upper] = n->GetBounds();
-      if (-lower != cur_lower || -upper != cur_upper) {
+      if (-upper != cur_lower || -lower != cur_upper) {
         update_parent_bounds = true;
+        n->SetBounds(-upper, -lower);
       }
-      n->SetBounds(-upper, -lower);
     }
   }
 
@@ -3795,6 +3795,11 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, L& low_lock) const {
         upper, (upper == GameResult::BLACK_WON ? std::max(losing_m, m) : m),
         prefer_tb ? Terminal::Tablebase : Terminal::EndOfGame);
   } else {
+    auto [cur_lower, cur_upper] = pl->GetBounds();
+    if (lower == cur_lower && upper == cur_upper) {
+      // Bounds are already set, so no need to check the parent.
+      return false;
+    }
     pl->SetBounds(lower, upper);
   }
 
