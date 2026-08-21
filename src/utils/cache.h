@@ -66,7 +66,7 @@ class IsManagedPointerType<dag_classic::IntrusiveSharedPtr<U>> {
 // unpin for that case.
 template <class V>
 class HashKeyedCache {
-  static const double constexpr kLoadFactor = 1.9;
+  static const double constexpr kLoadFactor = 3.1;
 
  public:
   static constexpr bool kIsManagedPointerType = IsManagedPointerType<V>::value;
