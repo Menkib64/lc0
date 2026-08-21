@@ -38,7 +38,6 @@
 #endif
 
 #include "utils/cppattributes.h"
-#include "utils/trace.h"
 
 #ifndef __has_feature
 #define __has_feature(x) 0
@@ -202,8 +201,6 @@ class CAPABILITY("mutex") SpinMutex {
   void SpinMutexSlowLock() {
     // Slow contention path. We use random spin count with occasional yield to
     // avoid starvation.
-    LCTRACE_FUNCTION_SCOPE;
-
     unsigned spins = 0;
     const auto tp = std::chrono::high_resolution_clock::now();
     const auto ticks = tp.time_since_epoch().count();
