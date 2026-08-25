@@ -857,7 +857,7 @@ endif
   ## ~~~~~
   ## hwloc
   ## ~~~~~
-  hwloc_dep = dependency('hwloc', required: false, fallback: ['hwloc'])
+  hwloc_dep = dependency('hwloc', required: false)
   numa_config = configuration_data()
   if hwloc_dep.found()
     deps += hwloc_dep
