@@ -2257,9 +2257,6 @@ bool SearchWorker::ExecuteOneIteration() {
   // 5. Retrieve NN computations (and terminal values) into nodes.
   FetchMinibatchResults();
 
-  ResetComputationTask reset_task(*this, std::move(computation_));
-  search_->state_.task_queue_.SubmitTask(reset_task, tid_);
-
   // 6. Propagate the new nodes' information to all their parents in the tree.
   bool work_done = DoBackupUpdate();
 
@@ -2280,8 +2277,6 @@ bool SearchWorker::ExecuteOneIteration() {
       }
     }
   }
-  // Wait for th reset task to complete before starting a new iteration.
-  reset_task.Wait(tid_);
   return true;
 }
 
@@ -3491,6 +3486,11 @@ bool SearchWorker::DoBackupUpdate() {
       search_->thread_count_.notify_all();
     }
   }
+
+  // Always do the reset task in the main thread because tcmalloc performs much
+  // better if frees happen in the same thread as the allocations.
+  ResetComputationTask reset_task(*this, std::move(computation_));
+  reset_task(tid_);
 
   for (auto& task : tasks) {
     task.Wait(tid_);
