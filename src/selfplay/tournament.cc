@@ -233,7 +233,8 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
             BackendManager::Get()->CreateFromParams(opts),
             options.GetSubdict(name),
             options.Get<float>(
-                classic::BaseSearchParams::kMaxOutOfOrderEvalsFactorId));
+                classic::BaseSearchParams::kMaxOutOfOrderEvalsFactorId),
+            kParallelism);
         backend_list.emplace_back(backends_[name_idx][color_idx]);
       }
     }

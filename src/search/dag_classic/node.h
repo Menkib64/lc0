@@ -268,6 +268,10 @@ class IntrusiveSharedPtr {
     AddRef();
   }
 
+  IntrusiveSharedPtr(IntrusiveSharedPtr&& other) noexcept : ptr_(other.ptr_) {
+    other.ptr_ = nullptr;
+  }
+
   IntrusiveSharedPtr& operator=(const IntrusiveSharedPtr& other) noexcept {
     assert(this != &other);
     reset(other.ptr_);

@@ -1125,7 +1125,7 @@ void Search::SendUciInfo(const classic::IterationStats& stats)
     }
   }
   common_info.tb_hits = tb_hits_.load(std::memory_order_acquire);
-  common_info.hashfull = tt_->GetSize() * 1000.0f / tt_->GetCapacity();
+  common_info.hashfull = tt_->GetLoadFactor() * 1000.0f;
 
   int multipv = 0;
   const auto default_q = -root_node_->GetQ(-draw_score);
@@ -3327,12 +3327,13 @@ void SearchWorker::ExtendNode(NodeToProcess& picked_node,
     auto new_node = search_->root_node_ == node
                         ? MakeShared<LowNode>(legal_moves, LowNode::RootTag{})
                         : MakeShared<LowNode>(legal_moves);
-    tt_hit = !search_->tt_->Insert(hash, std::move(new_node));
-    entry = search_->tt_->LookupAndPin(hash);
+    bool inserted;
+    std::tie(entry, inserted) =
+        search_->tt_->Emplace(hash, std::move(new_node));
+    tt_hit = !inserted;
   }
   assert(entry);
   node->SetLowNode(IntrusiveSharedPtr<LowNode>(entry));
-  search_->tt_->Unpin(hash, entry);
   if (!tt_hit) {
     picked_node.nn_queried = true;
     picked_node.eval_index =

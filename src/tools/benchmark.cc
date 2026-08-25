@@ -31,6 +31,7 @@
 
 #include "neural/memcache.h"
 #include "neural/shared_params.h"
+#include "search/classic/params.h"
 #include "search/classic/search.h"
 #include "search/classic/stoppers/factory.h"
 #include "search/classic/stoppers/stoppers.h"
@@ -78,7 +79,9 @@ void Benchmark::Run(bool run_shorter_benchmark) {
     auto backend = CreateMemCache(
         BackendManager::Get()->CreateFromParams(option_dict), option_dict,
         option_dict.Get<float>(
-            classic::BaseSearchParams::kMaxOutOfOrderEvalsFactorId));
+            classic::BaseSearchParams::kMaxOutOfOrderEvalsFactorId),
+        classic::Search::GetTaskWorkerCount(option_dict.Get<int>(
+            classic::BaseSearchParams::kTaskWorkersPerSearchWorkerId)));
 
     const int visits = option_dict.Get<int>(kNodesId);
     const int movetime = option_dict.Get<int>(kMovetimeId);

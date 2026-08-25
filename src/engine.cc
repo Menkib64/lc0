@@ -169,11 +169,13 @@ void Engine::UpdateBackendConfig() {
       backend_->UpdateConfiguration(options_) == Backend::NEED_RESTART) {
     backend_name_ = backend_name;
     backend_ = CreateMemCache(BackendManager::Get()->CreateFromParams(options_),
-                              options_, search_->GetMaxOutOfOrderFactor());
+                              options_, search_->GetMaxOutOfOrderFactor(),
+                              search_->GetConcurrentThreadCount());
     search_->SetBackend(backend_.get());
   } else {
     backend_->SetCacheSize(
-        options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
+        options_.Get<int>(SharedBackendParams::kNNCacheSizeId),
+        search_->GetConcurrentThreadCount());
   }
 }
 

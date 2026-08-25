@@ -62,8 +62,7 @@ class DagClassicSearch final : public SearchBase {
   DagClassicSearch(UciResponder* responder, const OptionsDict* options)
       : SearchBase(responder),
         options_(options),
-        tt_(options_->Get<int>(kHashId) * 1000000 /
-            tt_.GetItemStructSize()) {
+        tt_(options_->Get<int>(kHashId) * 1000000, GetConcurrentThreadCount()) {
   }
   ~DagClassicSearch() { search_.reset(); }
 
@@ -141,8 +140,8 @@ void DagClassicSearch::SetPosition(const GameState& pos) {
   LOGFILE << "Tree reset to a new position.";
   if (!is_same_game) time_manager_ = classic::MakeTimeManager(*options_);
   // Transposition table size.
-  tt_.SetCapacity(options_->Get<int>(kHashId) * 1000000 /
-                  tt_.GetItemStructSize());
+  tt_.SetCapacity(options_->Get<int>(kHashId) * 1000000,
+                  GetConcurrentThreadCount());
 }
 
 void DagClassicSearch::StartSearch(const GoParams& params) {
@@ -154,19 +153,15 @@ void DagClassicSearch::StartSearch(const GoParams& params) {
     LOGFILE << "Tree cleared.";
   }
 
-  const auto cache_size =
-      options_->Get<int>(SharedBackendParams::kNNCacheSizeId);
   // FIXME: This is too conservative.
   const size_t kAvgNodeSize =
       sizeof(Node) + sizeof(LowNode) +
       classic::MemoryWatchingStopper::kAvgMovesPerPosition * sizeof(Edge);
   const size_t kAvgCacheItemSize =
-      3 * sizeof(float) + sizeof(std::unique_ptr<float[]>) +
       sizeof(float[classic::MemoryWatchingStopper::kAvgMovesPerPosition]);
   size_t total_memory =
       tree_.get()->GetCurrentHead()->GetN() * kAvgNodeSize +
-      tt_.GetCapacity() * tt_.GetItemStructSize() +
-      cache_size * kAvgCacheItemSize;
+      tt_.GetCapacity() * (tt_.GetItemStructSize() + kAvgCacheItemSize);
   auto stopper = time_manager_->GetStopper(
       params, tree_.get()->HeadPosition(), total_memory, kAvgNodeSize,
       tree_.get()->GetCurrentHead()->GetN());
@@ -178,8 +173,7 @@ void DagClassicSearch::StartSearch(const GoParams& params) {
       StringsToMovelist(params.searchmoves, tree_->HeadPosition().GetBoard()),
       *move_start_time_, std::move(stopper), params.infinite, params.ponder,
       *options_, &tt_, syzygy_tb_);
-  LOGFILE << "Transposition table load factor is "
-          << tt_.GetSize() / static_cast<float>(tt_.GetCapacity());
+  LOGFILE << "Transposition table load factor is " << tt_.GetLoadFactor();
   LOGFILE << "Timer started at "
           << FormatTime(SteadyClockToSystemClock(*move_start_time_));
   search_->StartThreads(options_->Get<int>(kThreadsOptionId));

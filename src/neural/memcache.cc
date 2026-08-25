@@ -43,24 +43,57 @@ uint64_t ComputeEvalPositionHash(const EvalPosition& pos) {
 }
 
 struct CachedValue {
-  // State transitions happen atomically using release and aquire sematics for
+  CachedValue() : p{}, state(UNITIALIZED), num_moves(0) {}
+  CachedValue(const EvalPosition& pos) {
+    num_moves = pos.legal_moves.size();
+    p.reset(pos.legal_moves.empty() ? nullptr
+                                    : new float[pos.legal_moves.size()]);
+  }
+
+  ~CachedValue() { reset(); }
+
+  CachedValue(CachedValue&& other) noexcept
+      : p(std::move(other.p)),
+        state(other.state.load(std::memory_order_acquire)),
+        q(other.q),
+        d(other.d),
+        m(other.m),
+        e(other.e),
+        num_moves(other.num_moves) {
+    assert(state.load(std::memory_order_acquire) != UNITIALIZED || !p);
+    other.state.store(UNITIALIZED, std::memory_order_release);
+    assert(!other.p);
+  }
+
+  void reset() {
+    assert(state.load(std::memory_order_acquire) == UNITIALIZED ||
+           state.load(std::memory_order_acquire) == READY);
+    p.reset();
+    state.store(UNITIALIZED, std::memory_order_release);
+  }
+
+  explicit operator bool() const {
+    return state.load(std::memory_order_acquire) != UNITIALIZED;
+  }
+  // State transitions happen atomically using release and acquire semantics for
   // dependant reads and writes. The state progresses in order. Each transition
   // must happen only once which requires compare and exchange. Secondary
   // readers must wait for READY state to read the cached value.
   enum State {
-    NOT_QUEUED, // Initial state before NN submision.
-    NO_WAITERS, // One thread has taken this position to be evaluated. None is
-                // yet waiting for the result.
-    WAITERS,    // Another thread is waiting for results. Setting READY state
-                // must be folled by notify_all to wake up waiters.
-    READY,      // The value is ready. Waiters can read the value and proceed.
+    UNITIALIZED,
+    NOT_QUEUED,  // Initial state before NN submission.
+    NO_WAITERS,  // One thread has taken this position to be evaluated. None is
+                 // yet waiting for the result.
+    WAITERS,     // Another thread is waiting for results. Setting READY state
+                 // must be followed by notify_all to wake up waiters.
+    READY,       // The value is ready. Waiters can read the value and proceed.
   };
+  std::unique_ptr<float[]> p;
   WaitableAtomic<State> state = NOT_QUEUED;
   float q;
   float d;
   float m;
   float e;
-  std::unique_ptr<float[]> p;
   uint8_t num_moves;
 };
 
@@ -75,12 +108,14 @@ void CachedValueToEvalResult(const CachedValue& cv, const EvalResultPtr& ptr) {
 
 class MemCache : public CachingBackend {
  public:
-  MemCache(std::unique_ptr<Backend> wrapped, const OptionsDict& options, float max_out_of_order_evals_factor)
+  MemCache(std::unique_ptr<Backend> wrapped, const OptionsDict& options,
+           float max_out_of_order_evals_factor, size_t threads)
       : wrapped_backend_(std::move(wrapped)),
-        cache_(options.Get<int>(SharedBackendParams::kNNCacheSizeId)),
-        max_batch_size_(
-            wrapped_backend_->GetAttributes().maximum_batch_size *
-            (1.0f + max_out_of_order_evals_factor)) {}
+        cache_(2 * options.Get<int>(SharedBackendParams::kNNCacheSizeId) *
+                   cache_.GetItemStructSize() / cache_.GetItemsInStructure(),
+               threads),
+        max_batch_size_(wrapped_backend_->GetAttributes().maximum_batch_size *
+                        (1.0f + max_out_of_order_evals_factor)) {}
 
   BackendAttributes GetAttributes() const override {
     return wrapped_backend_->GetAttributes();
@@ -106,7 +141,11 @@ class MemCache : public CachingBackend {
     return wrapped_backend_->IsSameConfiguration(options);
   }
 
-  void SetCacheSize(size_t size) override { cache_.SetCapacity(size); }
+  void SetCacheSize(size_t size, size_t threads) override {
+    cache_.SetCapacity(
+        2 * size * cache_.GetItemStructSize() / cache_.GetItemsInStructure(),
+        threads);
+  }
 
  private:
   std::unique_ptr<Backend> wrapped_backend_;
@@ -124,64 +163,57 @@ class MemCacheComputation : public BackendComputation {
         entries_(memcache->max_batch_size_) {}
 
  private:
-  size_t UsedBatchSize() const override {
-    return entries_.size();
-  }
+  size_t UsedBatchSize() const override { return entries_.size(); }
   virtual AddInputResult AddInput(const EvalPosition& pos,
                                   EvalResultPtr result) override {
     assert(pos.legal_moves.size() == result.p.size() || result.p.empty());
     const uint64_t hash = ComputeEvalPositionHash(pos);
     bool to_be_queued = false;
-    auto value = std::make_unique<CachedValue>();
     EvalResultPtr result_ptr;
-    value->num_moves = pos.legal_moves.size();
-    value->p.reset(pos.legal_moves.empty()
-        ? nullptr
-        : new float[pos.legal_moves.size()]);
-    memcache_->cache_.Insert(hash, std::move(value));
+    std::unique_ptr<CachedValue> value;
 
-    HashKeyedCacheLock<CachedValue> lock(&memcache_->cache_, hash);
+    CachedValue* cached = std::get<0>(memcache_->cache_.Emplace(hash, pos));
+
     // Sometimes search queries NN without passing the legal moves. It is
     // still cached in this case, but in subsequent queries we only return it
     // if legal moves are not passed again. Otherwise check the size to guard
     // against hash collisions.
-    if (lock.holds_value() && (pos.legal_moves.empty() ||
-                               (lock->p && lock->num_moves == pos.legal_moves.size()))) {
+    if (cached &&
+        (pos.legal_moves.empty() ||
+         (cached->p && cached->num_moves == pos.legal_moves.size()))) {
       value.reset();
-      auto state = lock->state.load(std::memory_order_acquire);
+      auto state = cached->state.load(std::memory_order_acquire);
       while (state == CachedValue::NOT_QUEUED) {
-        if (lock->state.compare_exchange_weak(state, CachedValue::NO_WAITERS,
-                                              std::memory_order_acq_rel)) {
+        if (cached->state.compare_exchange_weak(state, CachedValue::NO_WAITERS,
+                                                std::memory_order_acq_rel)) {
           to_be_queued = true;
           break;
         }
       }
       if (state == CachedValue::READY) {
-        CachedValueToEvalResult(**lock, result);
+        CachedValueToEvalResult(*cached, result);
         return AddInputResult::FETCHED_IMMEDIATELY;
       }
       result_ptr = EvalResultPtr{
-        &lock->q, &lock->d, &lock->m, &lock->e,
-          lock->p ? std::span<float>{lock->p.get(), pos.legal_moves.size()}
-        : std::span<float>{}};
+          &cached->q, &cached->d, &cached->m, &cached->e,
+          cached->p ? std::span<float>{cached->p.get(), pos.legal_moves.size()}
+                    : std::span<float>{}};
     } else {
       // No space, hash collision, or value was removed after insert.
-      lock = HashKeyedCacheLock<CachedValue>();  // release the lock
-      if (!value) {
-        value = std::make_unique<CachedValue>();
-        value->num_moves = pos.legal_moves.size();
-        value->p.reset(pos.legal_moves.empty()
-            ? nullptr
-            : new float[pos.legal_moves.size()]);
-      }
+      cached = nullptr;
+      value = std::make_unique<CachedValue>(pos);
+    }
+    if (!cached) {
       to_be_queued = true;
       result_ptr = EvalResultPtr{
           &value->q, &value->d, &value->m, &value->e,
           value->p ? std::span<float>{value->p.get(), pos.legal_moves.size()}
                    : std::span<float>{}};
+    } else {
+      assert(cached->state.load(std::memory_order_acquire) != CachedValue::UNITIALIZED);
     }
     entries_.emplace_back(
-        Entry{std::move(lock), std::move(value), result, to_be_queued});
+        Entry{cached, std::move(value), result, to_be_queued});
     if (!to_be_queued) {
       // Another thread is already computing the value, we'll fetch it in
       // ComputeBlocking.
@@ -201,12 +233,13 @@ class MemCacheComputation : public BackendComputation {
       if (entry.queued_for_eval) {
         if (entry.value) {
           // There is no cache entry.
+          assert(!entry.cached);
           CachedValueToEvalResult(*entry.value, entry.result_ptr);
         } else {
           // There is a cache entry.
-          auto& lock = entry.lock;
-          assert(lock.holds_value());
-          CachedValueToEvalResult(**lock, entry.result_ptr);
+          auto& lock = entry.cached;
+          assert(lock);
+          CachedValueToEvalResult(*lock, entry.result_ptr);
           auto state = lock->state.exchange(CachedValue::READY,
                                             std::memory_order_release);
           // Wake up waiters if there are any,
@@ -220,8 +253,8 @@ class MemCacheComputation : public BackendComputation {
     // results were ready.
     for (auto& entry : entries_) {
       if (!entry.queued_for_eval) {
-        auto& lock = entry.lock;
-        assert(lock.holds_value());
+        auto& lock = entry.cached;
+        assert(lock);
         auto state = lock->state.load(std::memory_order_acquire);
         // Make sure writing side knows about waiters
         if (state == CachedValue::NO_WAITERS) {
@@ -232,13 +265,13 @@ class MemCacheComputation : public BackendComputation {
         lock->state.wait(CachedValue::WAITERS, std::memory_order_acquire);
         assert(lock->state.load(std::memory_order_acquire) ==
                CachedValue::READY);
-        CachedValueToEvalResult(**lock, entry.result_ptr);
+        CachedValueToEvalResult(*lock, entry.result_ptr);
       }
     }
   }
 
   struct Entry {
-    HashKeyedCacheLock<CachedValue> lock;
+    CachedValue* cached;
     std::unique_ptr<CachedValue> value;
     EvalResultPtr result_ptr;
     bool queued_for_eval = false;
@@ -256,21 +289,21 @@ std::unique_ptr<BackendComputation> MemCache::CreateComputation() {
 std::optional<EvalResult> MemCache::GetCachedEvaluation(
     const EvalPosition& pos) {
   const uint64_t hash = ComputeEvalPositionHash(pos);
-  HashKeyedCacheLock<CachedValue> lock(&cache_, hash);
-  if (!lock.holds_value() ||
-      lock->state.load(std::memory_order_acquire) != CachedValue::READY ||
+  auto* cached = cache_.LookupAndPin(hash);
+  if (!cached ||
+      cached->state.load(std::memory_order_acquire) != CachedValue::READY ||
       (!pos.legal_moves.empty() &&
-       !(lock->p && lock->num_moves == pos.legal_moves.size()))) {
+       !(cached->p && cached->num_moves == pos.legal_moves.size()))) {
     return std::nullopt;
   }
   EvalResult result;
-  result.d = lock->d;
-  result.q = lock->q;
-  result.m = lock->m;
-  result.e = lock->e;
-  if (lock->p) {
+  result.d = cached->d;
+  result.q = cached->q;
+  result.m = cached->m;
+  result.e = cached->e;
+  if (cached->p) {
     result.p.reserve(pos.legal_moves.size());
-    std::copy(lock->p.get(), lock->p.get() + pos.legal_moves.size(),
+    std::copy(cached->p.get(), cached->p.get() + pos.legal_moves.size(),
               std::back_inserter(result.p));
   }
   return result;
@@ -280,9 +313,9 @@ std::optional<EvalResult> MemCache::GetCachedEvaluation(
 
 std::unique_ptr<CachingBackend> CreateMemCache(
     std::unique_ptr<Backend> wrapped, const OptionsDict& options,
-    float max_out_of_order_evals_factor) {
+    float max_out_of_order_evals_factor, size_t threads) {
   return std::make_unique<MemCache>(std::move(wrapped), options,
-                                    max_out_of_order_evals_factor);
+                                    max_out_of_order_evals_factor, threads);
 }
 
 }  // namespace lczero

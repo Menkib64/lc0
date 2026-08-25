@@ -27,13 +27,28 @@
 
 #pragma once
 
+#include <absl/cleanup/cleanup.h>
+#include <absl/numeric/int128.h>
+#include <hwy/highway.h>
+
+#include <array>
+#include <bit>
 #include <cassert>
 #include <cstring>
+#include <execution>
 #include <memory>
-#include <string>
-#include <vector>
+#include <mutex>
+#include <numeric>
+#include <version>
 
+#include "utils/bititer.h"
 #include "utils/mutex.h"
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 namespace lczero {
 
@@ -43,312 +58,400 @@ class IntrusiveSharedPtr;
 }  // namespace dag_classic
 
 template <typename T>
-class IsManagedPointerType {
- public:
+struct IsManagedPointerType {
   static constexpr bool value = false;
 };
 
 template <typename U>
-class IsManagedPointerType<dag_classic::IntrusiveSharedPtr<U>> {
- public:
+struct IsManagedPointerType<dag_classic::IntrusiveSharedPtr<U>> {
+  static constexpr bool value = true;
+};
+template <typename U>
+struct IsManagedPointerType<std::unique_ptr<U>> {
   static constexpr bool value = true;
 };
 
+template <typename T, bool is_managed_pointer_type>
+struct HashValueToPointer {
+  using type = T*;
+};
+
+template <typename T>
+struct HashValueToPointer<T, true> {
+  using type = typename T::element_type*;
+};
+
 // A hash-keyed cache. Thread-safe. Takes ownership of all values, which are
-// deleted upon eviction; thus, using values stored requires pinning them, which
-// in turn requires Unpin()ing them after use. The use of HashKeyedCacheLock is
-// recommend to automate this element-memory management.
-// Unlike LRUCache, doesn't even consider trying to support LRU order.
+// deleted upon eviction; Implements per bucket LRU eviction. The cache uses
+// shards to reduce lock contention.
 // Does not support delete.
-// Does not support replace! Inserts to existing elements are silently ignored.
-// FIFO eviction.
-// Assumes that eviction while pinned is rare enough to not need to optimize
-// unpin for that case.
+// Does not support replace!
+// LRU eviction but tracked per bucket only.
 template <class V>
 class HashKeyedCache {
-  static const double constexpr kLoadFactor = 3.1;
-
  public:
   static constexpr bool kIsManagedPointerType = IsManagedPointerType<V>::value;
-  using element_type =
-      std::conditional_t<kIsManagedPointerType, V, std::unique_ptr<V>>;
-  using pointer = typename element_type::element_type*;
+  using element_type = V;
+  using pointer = HashValueToPointer<V, kIsManagedPointerType>::type;
 
-  HashKeyedCache(int capacity = 128)
-      : capacity_(capacity),
-        hash_(static_cast<size_t>(capacity * kLoadFactor + 1)) {}
+ private:
+  static constexpr size_t kElementsInBucket = 32;
+  static constexpr size_t kCacheLineSize = 64;
+  static constexpr size_t kShardsPerThread = 16;
+  // We need at least enough capacity make it practically impossible to fill a
+  // bucket in a single computation.
+  static constexpr size_t kMinimumSafeCapacity = 10000;
 
-  ~HashKeyedCache() {
-    EvictToCapacity(0);
-    assert(size_ == 0);
-    assert(allocated_ == 0);
+  using Entry = std::pair<uint64_t, element_type>;
+
+  struct Bucket {
+    Bucket() {
+      for (size_t i = 0; i < kElementsInBucket; ++i) {
+        entries[i].first = i + kElementsInBucket;
+        low_byte[i] = i;
+        least_recent_access[i] = kElementsInBucket - 1 - i;
+      }
+    }
+    static constexpr hn::CappedTag<uint8_t, kElementsInBucket> byte_vec_tag{};
+    alignas(kCacheLineSize) std::array<uint8_t, kElementsInBucket> low_byte;
+    std::array<uint8_t, kElementsInBucket> least_recent_access;
+    std::array<Entry, kElementsInBucket> entries;
+  };
+
+  struct Shard {
+    alignas(kCacheLineSize) mutable SpinMutex mutex;
+  };
+
+  template <typename T>
+  struct AlignedDeleter {
+    size_t capacity;
+    void operator()(T* ptr) const {
+      for (size_t i = 0; i < capacity; ++i) {
+        std::destroy_at(ptr + i);
+      }
+#if defined(_MSC_VER)
+      _aligned_free(ptr);
+#else
+      std::free(ptr);
+#endif
+    }
+  };
+
+  using HashType = std::unique_ptr<Bucket[], AlignedDeleter<Bucket>>;
+
+  uint8_t GetKeyLowByte(uint64_t key) { return (key & 0xff); }
+
+  uint64_t MulHigh(uint64_t x, size_t y) const {
+#if defined(_MSC_VER)
+    return __umulh(x, y);
+#else
+    return static_cast<uint64_t>((static_cast<__uint128_t>(x) * y) >> 64);
+#endif
   }
+
+  Bucket* GetBucketAligned() {
+    return std::assume_aligned<kCacheLineSize>(hash_.get());
+  }
+
+  const Bucket* GetBucketAligned() const {
+    return const_cast<HashKeyedCache*>(this)->GetBucketAligned();
+  }
+
+  Bucket& GetBucket(uint64_t key) {
+    size_t idx = MulHigh(key, capacity_);
+    return GetBucketAligned()[idx];
+  }
+
+  const Shard* GetShards() const {
+    const Bucket* last = GetBucketAligned() + capacity_;
+    const Shard* first = reinterpret_cast<const Shard*>(last);
+    return std::assume_aligned<kCacheLineSize>(first);
+  }
+
+  SpinMutex& GetShardMutex(const Bucket& bucket) const {
+    size_t bucket_index = &bucket - GetBucketAligned();
+    size_t idx = MulHigh(bucket_index, shard_mul_);
+    return GetShards()[idx].mutex;
+  }
+
+  void UpdateLastAccess(Bucket& bucket, uint8_t current) {
+    std::transform(
+        std::execution::unseq, bucket.least_recent_access.begin(),
+        bucket.least_recent_access.end(), bucket.least_recent_access.begin(),
+        [current](uint8_t access) -> uint8_t {
+          return access < current ? access + 1 : access == current ? 0 : access;
+        });
+    assert(
+        std::all_of(std::execution::unseq, bucket.least_recent_access.begin(),
+                    bucket.least_recent_access.end(),
+                    [](uint8_t access) { return access < kElementsInBucket; }));
+  }
+
+  HashType AllocateHash(size_t capacity, size_t shards) const {
+    if (capacity == 0) return nullptr;
+    assert(capacity >= kMinimumSafeCapacity);
+    size_t bytes = sizeof(Bucket) * capacity + sizeof(Shard) * shards;
+    assert(bytes % kCacheLineSize == 0);
+#if defined(_MSC_VER)
+    void* ptr = _aligned_malloc(bytes, kCacheLineSize);
+#else
+    void* ptr = std::aligned_alloc(kCacheLineSize, bytes);
+#endif
+    bool clean_exit = false;
+    absl::Cleanup cleanup([ptr, &clean_exit]() {
+      if (clean_exit) return;
+#if defined(_MSC_VER)
+      _aligned_free(ptr);
+#else
+      std::free(ptr);
+#endif
+    });
+    for (size_t i = 0; i < capacity; ++i) {
+      std::construct_at(reinterpret_cast<Bucket*>(ptr) + i);
+    }
+    for (size_t i = 0; i < shards; ++i) {
+      std::construct_at(
+          reinterpret_cast<Shard*>(reinterpret_cast<Bucket*>(ptr) + capacity) +
+          i);
+    }
+    clean_exit = true;
+    return HashType(reinterpret_cast<Bucket*>(ptr),
+                    AlignedDeleter<Bucket>{capacity});
+  }
+
+  Entry* FindLocked(Bucket& bucket, uint64_t key) {
+    uint8_t key_low_byte = GetKeyLowByte(key);
+    const size_t lanes = hn::Lanes(bucket.byte_vec_tag);
+    uint32_t mask = 0;
+    static_assert(std::numeric_limits<decltype(mask)>::digits >=
+                  kElementsInBucket);
+    for (size_t chunk = 0; chunk < kElementsInBucket; chunk += lanes) {
+      auto low_byte_vec =
+          hn::Load(bucket.byte_vec_tag, bucket.low_byte.data() + chunk);
+      auto needle = hn::Set(bucket.byte_vec_tag, key_low_byte);
+      auto cmp_result = low_byte_vec == needle;
+      mask |= hn::BitsFromMask(bucket.byte_vec_tag, cmp_result) << chunk;
+    }
+
+    for (auto bit : IterateBits(mask)) {
+      if (bucket.entries[bit].first == key) {
+        UpdateLastAccess(bucket, bucket.least_recent_access[bit]);
+        return &bucket.entries[bit];
+      }
+    }
+    return nullptr;
+  }
+
+  size_t CalculateCapacity(size_t capacity) const {
+    return capacity == 0 ? 0
+                         : std::max(kMinimumSafeCapacity,
+                                    (capacity - 1) / sizeof(Bucket) + 1);
+  }
+
+  size_t CalculateShards(size_t threads) const {
+    return std::max<size_t>(1, threads * kShardsPerThread);
+  }
+
+  size_t CalculateShardMul(size_t shards, size_t capacity) const {
+    if (shards == 1) return 0;
+    if (capacity == std::numeric_limits<size_t>::max()) return shards;
+    // Calculate shards << 64 / capacity. This is used to calculate the shard
+    // index from the bucket index.
+    if (sizeof(size_t) == 8) {
+      absl::uint128 shards_128 = absl::MakeUint128(shards, 0);
+      absl::uint128 result = shards_128 / (capacity + 1);
+      return static_cast<size_t>(result);
+    } else {
+      return (static_cast<uint64_t>(shards) << 32) / (capacity + 1);
+    }
+  }
+
+  pointer ValueToPointer(element_type& value) {
+    if constexpr (kIsManagedPointerType) {
+      return value.get();
+    } else {
+      return &value;
+    }
+  }
+
+ public:
+  HashKeyedCache(size_t capacity, size_t threads)
+      : capacity_(CalculateCapacity(capacity)),
+        shards_(CalculateShards(threads)),
+        shard_mul_(CalculateShardMul(shards_, capacity_)),
+        hash_(AllocateHash(capacity_, CalculateShards(threads))) {}
+
+  ~HashKeyedCache() {}
 
   // Inserts the element under key @key with value @val. Unless the key is
   // already in the cache. If the key is already in the cache, the new value is
   // silently ignored and the old value is kept. If the key is not in the cache,
   // the new value is moved to cache.
-  bool Insert(uint64_t key, element_type&& val) {
-    if (capacity_.load(std::memory_order_relaxed) == 0) return true;
+  template <typename... Args>
+  std::pair<pointer, bool> Emplace(uint64_t key, Args&&... args) {
+    if (capacity_ == 0) return {nullptr, false};
+    auto& bucket = GetBucket(key);
+    SpinMutex::Lock lock(GetShardMutex(bucket));
+    uint8_t key_low_byte = GetKeyLowByte(key);
 
-    SpinMutex::Lock lock(mutex_);
-
-    size_t idx = key % hash_.size();
-    while (true) {
-      if (!hash_[idx].in_use) break;
-      if (hash_[idx].key == key) {
-        // Already exists.
-        return false;
-      }
-      ++idx;
-      if (idx >= hash_.size()) idx -= hash_.size();
+    // Check if key already exists in the bucket.
+    Entry* entry = FindLocked(bucket, key);
+    if (entry) {
+      // Already exists.
+      return {ValueToPointer(entry->second), false};
     }
-    hash_[idx].key = key;
-    hash_[idx].value = std::move(val);
-    hash_[idx].pins = 0;
-    hash_[idx].in_use = true;
-    insertion_order_.push_back(key);
-    ++size_;
-    ++allocated_;
 
-    EvictToCapacity(capacity_);
-    return true;
+    // If bucket is full, evict the least recently used entry.
+    // Then insert the new entry to the bucket.
+    uint32_t mask = 0;
+    static_assert(std::numeric_limits<decltype(mask)>::digits >=
+                  kElementsInBucket);
+    for (size_t chunk = 0; chunk < kElementsInBucket;
+         chunk += hn::Lanes(bucket.byte_vec_tag)) {
+      auto lru_vec = hn::Load(bucket.byte_vec_tag,
+                              bucket.least_recent_access.data() + chunk);
+      auto needle = hn::Set(bucket.byte_vec_tag, kElementsInBucket - 1);
+      auto cmp_result = hn::Eq(lru_vec, needle);
+      mask |= hn::BitsFromMask(bucket.byte_vec_tag, cmp_result) << chunk;
+    }
+    assert(std::popcount(mask) == 1);
+    size_t idx = std::countr_zero(mask);
+    // Evict the entry.
+    auto evicted = std::move(bucket.entries[idx].second);
+    bucket.entries[idx].first = key;
+    std::construct_at(&bucket.entries[idx].second, std::forward<Args>(args)...);
+    bucket.low_byte[idx] = key_low_byte;
+    UpdateLastAccess(bucket, kElementsInBucket - 1);
+
+    // Evicted node is freed outside the lock to avoid random delays from memory
+    // management blocking other threads.
+    lock.unlock();
+    return {ValueToPointer(bucket.entries[idx].second), true};
   }
 
   // Checks whether a key exists. Doesn't pin. Of course the next moment the
   // key may be evicted.
   bool ContainsKey(uint64_t key) {
-    if (capacity_.load(std::memory_order_relaxed) == 0) return false;
+    if (capacity_ == 0) return false;
 
-    SpinMutex::Lock lock(mutex_);
-    size_t idx = key % hash_.size();
-    while (true) {
-      if (!hash_[idx].in_use) break;
-      if (hash_[idx].key == key) {
-        return true;
-      }
-      ++idx;
-      if (idx >= hash_.size()) idx -= hash_.size();
-    }
-    return false;
+    Bucket& bucket = GetBucket(key);
+    SpinMutex::Lock lock(GetShardMutex(bucket));
+    Entry* entry = FindLocked(bucket, key);
+    return entry != nullptr;
   }
 
   // Looks up and pins the element by key. Returns nullptr if not found.
-  // If found, a call to Unpin must be made for each such element.
-  // Use of HashedKeyCacheLock is recommended to automate this pin management.
   pointer LookupAndPin(uint64_t key) {
-    if (capacity_.load(std::memory_order_relaxed) == 0) return nullptr;
+    if (capacity_ == 0) return nullptr;
 
-    SpinMutex::Lock lock(mutex_);
-
-    size_t idx = key % hash_.size();
-    while (true) {
-      if (!hash_[idx].in_use) break;
-      if (hash_[idx].key == key) {
-        ++hash_[idx].pins;
-        return hash_[idx].value.get();
-      }
-      ++idx;
-      if (idx >= hash_.size()) idx -= hash_.size();
+    Bucket& bucket = GetBucket(key);
+    SpinMutex::Lock lock(GetShardMutex(bucket));
+    Entry* entry = FindLocked(bucket, key);
+    if (entry) {
+      return ValueToPointer(entry->second);
     }
     return nullptr;
-  }
-
-  // Unpins the element given key and value. Use of HashedKeyCacheLock is
-  // recommended to automate this pin management.
-  void Unpin(uint64_t key, pointer value) {
-    SpinMutex::Lock lock(mutex_);
-
-    // Checking evicted list first.
-    for (auto it = evicted_.begin(); it != evicted_.end(); ++it) {
-      auto& entry = *it;
-      if (key == entry.key && entry.value.get() == value) {
-        if (--entry.pins == 0) {
-          --allocated_;
-          evicted_.erase(it);
-          return;
-        } else {
-          return;
-        }
-      }
-    }
-    // Now the main list.
-    size_t idx = key % hash_.size();
-    while (true) {
-      if (!hash_[idx].in_use) break;
-      if (hash_[idx].key == key && hash_[idx].value.get() == value) {
-        --hash_[idx].pins;
-        return;
-      }
-      ++idx;
-      if (idx >= hash_.size()) idx -= hash_.size();
-    }
-    assert(false);
   }
 
   // Sets the capacity of the cache. If new capacity is less than current size
   // of the cache, oldest entries are evicted. In any case the hashtable is
   // rehashed.
-  void SetCapacity(int capacity) {
-    // This is the one operation that can be expected to take a long time, which
-    // usually means a SpinMutex is not a great idea. However we should only
-    // very rarely have any contention on the lock while this function is
-    // running, since its called very rarely and almost always before things
-    // start happening.
-    SpinMutex::Lock lock(mutex_);
+  // There must be no concurrent access to the cache.
+  void SetCapacity(size_t capacity, size_t threads) {
+    if (CalculateCapacity(capacity) == capacity_ &&
+        CalculateShards(threads) <= shards_) {
+      shards_ = CalculateShards(threads);
+      shard_mul_ = CalculateShardMul(shards_, capacity_);
+      return;
+    }
 
-    if (capacity_.load(std::memory_order_relaxed) == capacity) return;
-    EvictToCapacity(capacity);
-    capacity_.store(capacity);
+    auto old_hash =
+        AllocateHash(CalculateCapacity(capacity),
+                     std::max<size_t>(1, threads * kShardsPerThread));
+    size_t old_capacity = CalculateCapacity(capacity);
+    std::swap(hash_, old_hash);
+    std::swap(capacity_, old_capacity);
+    shards_ = CalculateShards(threads);
+    shard_mul_ = CalculateShardMul(shards_, capacity_);
 
-    std::vector<Entry> new_hash(
-        static_cast<size_t>(capacity * kLoadFactor + 1));
-
-    if (size_ != 0) {
-      for (Entry& item : hash_) {
-        if (!item.in_use) continue;
-        size_t idx = item.key % new_hash.size();
-        while (true) {
-          if (!new_hash[idx].in_use) break;
-          ++idx;
-          if (idx >= new_hash.size()) idx -= new_hash.size();
+    // Rehash everything starting from the oldest entry. This will evict the
+    // oldest entries first if any bucket becomes full.
+    for (size_t age = kElementsInBucket; age-- > 0;) {
+      for (size_t i = 0; i < old_capacity; ++i) {
+        Bucket& bucket = old_hash[i];
+        uint32_t mask = 0;
+        static_assert(std::numeric_limits<decltype(mask)>::digits >=
+                      kElementsInBucket);
+        const size_t lanes = hn::Lanes(bucket.byte_vec_tag);
+        for (size_t chunk = 0; chunk < kElementsInBucket; chunk += lanes) {
+          auto access_vec = hn::Load(bucket.byte_vec_tag,
+                                     bucket.least_recent_access.data() + chunk);
+          auto needle = hn::Set(bucket.byte_vec_tag, age);
+          auto cmp_result = hn::Eq(access_vec, needle);
+          mask |= hn::BitsFromMask(bucket.byte_vec_tag, cmp_result) << chunk;
         }
-        new_hash[idx].key = item.key;
-        new_hash[idx].value = std::move(item.value);
-        new_hash[idx].pins = item.pins;
-        new_hash[idx].in_use = true;
+        assert(std::popcount(mask) == 1);
+        size_t idx = std::countr_zero(mask);
+        Entry& entry = bucket.entries[idx];
+        if (!entry.second) continue;
+        Emplace(entry.first, std::move(entry.second));
       }
     }
-    hash_.swap(new_hash);
   }
 
-  // Clears the cache;
+  // Clears the cache.
+  // There must be no concurrent access to the cache.
   void Clear() {
-    SpinMutex::Lock lock(mutex_);
-    EvictToCapacity(0);
-  }
-
-  int GetSize() const {
-    SpinMutex::Lock lock(mutex_);
-    return size_;
-  }
-  int GetCapacity() const { return capacity_.load(std::memory_order_relaxed); }
-  static constexpr size_t GetItemStructSize() { return sizeof(Entry); }
-
- private:
-  struct Entry {
-    Entry() {}
-    Entry(uint64_t key, element_type value) : key(key), value(std::move(value)) {}
-    uint64_t key;
-    element_type value;
-    int pins = 0;
-    bool in_use = false;
-  };
-
-  void EvictItem() REQUIRES(mutex_) {
-    --size_;
-    uint64_t key = insertion_order_.front();
-    insertion_order_.pop_front();
-    size_t idx = key % hash_.size();
-    while (true) {
-      if (hash_[idx].in_use && hash_[idx].key == key) {
-        break;
+    for (size_t i = 0; i < capacity_; ++i) {
+      Bucket& bucket = GetBucketAligned()[i];
+      for (size_t j = 0; j < kElementsInBucket; ++j) {
+        bucket.entries[j].second.reset();
+        bucket.entries[j].first = j + kElementsInBucket;
+        bucket.low_byte[j] = j;
+        bucket.least_recent_access[j] = kElementsInBucket - 1 - j;
       }
-      ++idx;
-      if (idx >= hash_.size()) idx -= hash_.size();
     }
-    if (hash_[idx].pins == 0) {
-      --allocated_;
-      hash_[idx].value.reset();
-      hash_[idx].in_use = false;
-    } else {
-      evicted_.emplace_back(hash_[idx].key, std::move(hash_[idx].value));
-      evicted_.back().pins = hash_[idx].pins;
-      hash_[idx].pins = 0;
-      hash_[idx].in_use = false;
-    }
-    size_t next = idx + 1;
-    if (next >= hash_.size()) next -= hash_.size();
-    while (true) {
-      if (!hash_[next].in_use) {
-        break;
+  }
+
+  size_t GetCapacity() const { return capacity_; }
+  static constexpr size_t GetItemStructSize() { return sizeof(Bucket); }
+  static constexpr size_t GetItemsInStructure() { return kElementsInBucket; }
+
+  float GetLoadFactor() const {
+    const size_t limit = 1000;
+    size_t count = 0;
+    size_t total = 0;
+    std::unique_lock<SpinMutex> lock;
+    SpinMutex* current_mutex = nullptr;
+    for (size_t i = 0; i < capacity_ && total < limit; ++i) {
+      const Bucket& bucket = GetBucketAligned()[i];
+      SpinMutex& mutex = GetShardMutex(bucket);
+      if (current_mutex != &mutex) {
+        current_mutex = &mutex;
+        if (lock.owns_lock()) {
+          lock.unlock();
+        }
+        lock = std::unique_lock<SpinMutex>(mutex);
       }
-      size_t target = hash_[next].key % hash_.size();
-      if (!InRange(target, idx + 1, next)) {
-        std::swap(hash_[next], hash_[idx]);
-        idx = next;
+
+      for (auto& entry : bucket.entries) {
+        if (entry.second) {
+          ++count;
+        }
+        if (++total >= limit) {
+          break;
+        }
       }
-      ++next;
-      if (next >= hash_.size()) next -= hash_.size();
     }
-  }
-
-  bool InRange(size_t target, size_t start, size_t end) {
-    if (start <= end) {
-      return target >= start && target <= end;
-    } else {
-      return target >= start || target <= end;
-    }
-  }
-
-  void EvictToCapacity(int capacity) REQUIRES(mutex_) {
-    if (capacity < 0) capacity = 0;
-    while (size_ > capacity) {
-      EvictItem();
-    }
-  }
-
-  std::atomic<int> capacity_;
-  int size_ GUARDED_BY(mutex_) = 0;
-  int allocated_ GUARDED_BY(mutex_) = 0;
-  // Fresh in back, stale at front.
-  std::deque<uint64_t> GUARDED_BY(mutex_) insertion_order_;
-  std::vector<Entry> GUARDED_BY(mutex_) evicted_;
-  std::vector<Entry> GUARDED_BY(mutex_) hash_;
-
-  mutable SpinMutex mutex_;
-};
-
-// Convenience class for pinning cache items.
-template <class V>
-class HashKeyedCacheLock {
- public:
-  // Looks up the value in @cache by @key and pins it if found.
-  HashKeyedCacheLock(HashKeyedCache<V>* cache, uint64_t key)
-      : cache_(cache), key_(key), value_(cache->LookupAndPin(key_)) {}
-
-  // Unpins the cache entry (if holds).
-  ~HashKeyedCacheLock() {
-    if (value_) cache_->Unpin(key_, value_);
-  }
-
-  HashKeyedCacheLock(const HashKeyedCacheLock&) = delete;
-
-  // Returns whether lock holds any value.
-  bool holds_value() const { return value_; }
-  operator bool() const { return value_; }
-
-  // Gets the value.
-  V* operator->() const { return value_; }
-  V* operator*() const { return value_; }
-
-  HashKeyedCacheLock() {}
-  HashKeyedCacheLock(HashKeyedCacheLock&& other)
-      : cache_(other.cache_), key_(other.key_), value_(other.value_) {
-    other.value_ = nullptr;
-  }
-  void operator=(HashKeyedCacheLock&& other) {
-    if (value_) cache_->Unpin(key_, value_);
-    cache_ = other.cache_;
-    key_ = other.key_;
-    value_ = other.value_;
-    other.value_ = nullptr;
+    return static_cast<float>(count) / total;
   }
 
  private:
-  HashKeyedCache<V>* cache_ = nullptr;
-  uint64_t key_;
-  V* value_ = nullptr;
+  // These are static when concurrent access happens.
+  size_t capacity_;
+  size_t shards_;
+  size_t shard_mul_;
+  HashType hash_;
 };
 
 }  // namespace lczero
