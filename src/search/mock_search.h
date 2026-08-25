@@ -48,6 +48,7 @@ class MockSearch : public SearchBase {
   MOCK_METHOD(void, AbortSearch, (), (override));
   MOCK_METHOD(SearchArtifacts, GetArtifacts, (), (const, override));
   MOCK_METHOD(float, GetMaxOutOfOrderFactor, (), (const, override));
+  MOCK_METHOD(size_t, GetConcurrentThreadCount, (), (const, override));
 };
 
 class MockSearchFactory : public SearchFactory {
