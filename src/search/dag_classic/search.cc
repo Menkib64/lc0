@@ -2607,11 +2607,10 @@ void SearchWorker::GatherMinibatch() {
       // to identify exactly which ones are afterwards and only prune those.
       // This may remove too many items, but hopefully most of the time they
       // will just be added back in the same in the next gather.
-      ScheduleCancelTask(collisions_start, collisions_end, false);
       auto tasks = ScheduleBackupUpdateTasks(
           *this, search_->state_.task_queue_.Size() + 1, state_.ooobatch_);
+      ScheduleCancelTask(collisions_start, collisions_end, false);
       number_out_of_order_ += state_.ooobatch_.size();
-      cancel_task_.Wait(tid_);
       for (auto& task : tasks) {
         task.Wait(tid_);
         search_->total_playouts_ += task.result_.total_playouts_;
@@ -2621,6 +2620,7 @@ void SearchWorker::GatherMinibatch() {
             std::max(search_->max_depth_, task.result_.max_depth_);
       }
       state_.ooobatch_.clear();
+      cancel_task_.Wait(tid_);
       state_.collisions_.erase(state_.collisions_.begin() + collisions_start,
                                state_.collisions_.begin() + collisions_end);
       collisions_end = collisions_start;
