@@ -84,6 +84,10 @@ class InstamoveSearch : public SearchBase {
     return 0.0f;
   }
 
+  size_t GetConcurrentThreadCount() const override {
+    return 1;
+  }
+
   Move bestmove_;
   std::atomic<bool> responded_bestmove_{false};
   std::unique_ptr<Backend> batchsplit_backend_;

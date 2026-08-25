@@ -94,6 +94,9 @@ class Search {
   // from temperature having been applied again.
   void ResetBestMove();
 
+  static size_t GetTaskWorkerCount(int task_worker_option,
+                                   bool backend_runs_on_cpu = false);
+
  private:
   // Computes the best move, maybe with temperature (according to the settings).
   void EnsureBestMoveKnown();
@@ -213,17 +216,9 @@ class SearchWorker {
         history_(search_->played_history_),
         params_(params),
         moves_left_support_(search_->backend_attributes_.has_mlh) {
-    task_workers_ = params.GetTaskWorkersPerSearchWorker();
-    if (task_workers_ < 0) {
-      if (search_->backend_attributes_.runs_on_cpu) {
-        task_workers_ = 0;
-      } else {
-        int working_threads = std::max(
-            search_->thread_count_.load(std::memory_order_acquire) - 1, 1);
-        task_workers_ = std::min(
-            std::thread::hardware_concurrency() / working_threads - 1, 4U);
-      }
-    }
+    task_workers_ =
+        Search::GetTaskWorkerCount(params.GetTaskWorkersPerSearchWorker(),
+                                   search_->backend_attributes_.runs_on_cpu);
     for (int i = 0; i < task_workers_; i++) {
       task_workspaces_.emplace_back();
       task_threads_.emplace_back([this, i]() { this->RunTasks(i); });

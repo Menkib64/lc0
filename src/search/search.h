@@ -82,6 +82,8 @@ class SearchBase {
 
   virtual float GetMaxOutOfOrderFactor() const = 0;
 
+  virtual size_t GetConcurrentThreadCount() const = 0;
+
  protected:
   UciResponder* uci_responder_ = nullptr;
   Backend* backend_ = nullptr;

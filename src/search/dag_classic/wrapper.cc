@@ -26,11 +26,12 @@
 */
 
 #include "chess/gamestate.h"
+#include "neural/shared_params.h"
+#include "search/classic/params.h"
 #include "search/classic/stoppers/factory.h"
 #include "search/dag_classic/search.h"
 #include "search/register.h"
 #include "search/search.h"
-#include "neural/shared_params.h"
 #include "utils/numa.h"
 #include "utils/trace.h"
 
@@ -56,10 +57,13 @@ const OptionId kHashId{{.long_flag = "hash",
                         .help_text = "Size of the transposition table in MB.",
                         .visibility = OptionId::kAlwaysVisible}};
 
-class DagClassicSearch : public SearchBase {
+class DagClassicSearch final : public SearchBase {
  public:
   DagClassicSearch(UciResponder* responder, const OptionsDict* options)
-      : SearchBase(responder), options_(options) {
+      : SearchBase(responder),
+        options_(options),
+        tt_(options_->Get<int>(kHashId) * 1000000 /
+            tt_.GetItemStructSize()) {
   }
   ~DagClassicSearch() { search_.reset(); }
 
@@ -84,6 +88,14 @@ class DagClassicSearch : public SearchBase {
   float GetMaxOutOfOrderFactor() const override {
     return options_->Get<float>(
         classic::BaseSearchParams::kMaxOutOfOrderEvalsFactorId);
+  }
+
+  size_t GetConcurrentThreadCount() const override {
+    return 1 +
+           Search::GetTaskWorkerCount(
+               options_->Get<int>(
+                   classic::BaseSearchParams::kTaskWorkersPerSearchWorkerId),
+               backend_ && backend_->GetAttributes().runs_on_cpu);
   }
 
   const OptionsDict* options_;

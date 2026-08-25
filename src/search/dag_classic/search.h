@@ -292,6 +292,9 @@ class Search {
 
   void RecordNPSStartTime();
 
+  static size_t GetTaskWorkerCount(int task_worker_option,
+                                   bool runs_on_cpu = false);
+
  private:
   // Computes the best move, maybe with temperature (according to the settings).
   void EnsureBestMoveKnown();

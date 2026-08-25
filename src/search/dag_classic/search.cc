@@ -1778,20 +1778,25 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
   return {};
 }
 
+size_t Search::GetTaskWorkerCount(int task_workers, bool runs_on_cpu) {
+  if (task_workers < 0) {
+    if (runs_on_cpu) {
+      task_workers = 0;
+    } else {
+      task_workers = std::min(std::thread::hardware_concurrency() - 1, 4U);
+    }
+  }
+  return task_workers;
+}
+
 void Search::StartThreads(size_t how_many) {
   if (how_many == 0 && threads_.size() == 0) {
     how_many = backend_attributes_.suggested_num_search_threads +
                !backend_attributes_.runs_on_cpu;
   }
 
-  int task_workers = params_.GetTaskWorkersPerSearchWorker();
-  if (task_workers < 0) {
-    if (backend_attributes_.runs_on_cpu) {
-      task_workers = 0;
-    } else {
-      task_workers = std::min(std::thread::hardware_concurrency() - 1, 4U);
-    }
-  }
+  int task_workers = GetTaskWorkerCount(params_.GetTaskWorkersPerSearchWorker(),
+                                        backend_attributes_.runs_on_cpu);
   Numa::ReserveSearchWorkers(how_many);
   state_.StartANewSearch(task_workers, how_many);
   // Only one thread can do work until the root has been evaluated. Other

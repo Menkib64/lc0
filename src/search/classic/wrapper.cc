@@ -76,6 +76,13 @@ class ClassicSearch : public SearchBase {
     return options_->Get<float>(BaseSearchParams::kMaxOutOfOrderEvalsFactorId);
   }
 
+  size_t GetConcurrentThreadCount() const override {
+    return 1 + Search::GetTaskWorkerCount(
+                   options_->Get<int>(
+                       BaseSearchParams::kTaskWorkersPerSearchWorkerId),
+                   backend_ && backend_->GetAttributes().runs_on_cpu);
+  }
+
   const OptionsDict* options_;
   std::unique_ptr<TimeManager> time_manager_;
   std::unique_ptr<Search> search_;

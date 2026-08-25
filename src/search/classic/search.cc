@@ -1090,6 +1090,17 @@ void Search::CancelSharedCollisions() REQUIRES(nodes_mutex_) {
   shared_collisions_.clear();
 }
 
+size_t Search::GetTaskWorkerCount(int task_workers, bool runs_on_cpu) {
+  if (task_workers < 0) {
+    if (runs_on_cpu) {
+      task_workers = 0;
+    } else {
+      task_workers = std::min(std::thread::hardware_concurrency() - 1, 4U);
+    }
+  }
+  return task_workers;
+}
+
 Search::~Search() {
   Abort();
   Wait();
