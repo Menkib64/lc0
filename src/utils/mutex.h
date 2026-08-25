@@ -28,7 +28,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -178,7 +177,7 @@ class CAPABILITY("mutex") SpinMutex {
     __tsan_mutex_pre_lock(&mutex_, 0);
 #endif
     int val = 0;
-    if (mutex_.compare_exchange_strong(val, 1, std::memory_order_acq_rel))
+    if (mutex_.compare_exchange_strong(val, 1, std::memory_order_acquire))
         [[likely]] {
 #if TSAN_BUILD
       __tsan_mutex_post_lock(&mutex_, 0, 0);
@@ -200,7 +199,7 @@ class CAPABILITY("mutex") SpinMutex {
 
     while (true) {
       int val = 0;
-      if (mutex_.compare_exchange_weak(val, 1, std::memory_order_acq_rel)) {
+      if (mutex_.compare_exchange_weak(val, 1, std::memory_order_acquire)) {
 #if TSAN_BUILD
         __tsan_mutex_post_lock(&mutex_, 0, 0);
 #endif
@@ -216,6 +215,23 @@ class CAPABILITY("mutex") SpinMutex {
         SpinloopPause();
       }
     }
+  }
+  bool try_lock() TRY_ACQUIRE(true) {
+#if TSAN_BUILD
+    __tsan_mutex_pre_lock(&mutex_, __tsan_mutex_try_lock);
+#endif
+    int val = 0;
+    if (mutex_.compare_exchange_strong(val, 1, std::memory_order_acquire))
+        [[likely]] {
+#if TSAN_BUILD
+      __tsan_mutex_post_lock(&mutex_, __tsan_mutex_try_lock, 0);
+#endif
+      return true;
+    }
+#if TSAN_BUILD
+    __tsan_mutex_post_lock(&mutex_, __tsan_mutex_try_lock_failed, 0);
+#endif
+    return false;
   }
   void unlock() RELEASE() {
 #if TSAN_BUILD
