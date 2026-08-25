@@ -1101,7 +1101,6 @@ inline double WDLRescale(T& v, T& d, float wdl_rescale_ratio,
 
 void Search::SendUciInfo(const classic::IterationStats& stats)
     REQUIRES(nodes_mutex_) REQUIRES(counters_mutex_) {
-  LCTRACE_FUNCTION_SCOPE;
   const auto max_pv = params_.GetMultiPv();
   const auto edges = GetBestChildrenNoTemperature(root_node_, max_pv, 0);
   const auto score_type = params_.GetScoreType();
@@ -1613,7 +1612,6 @@ void Search::EnsureBestMoveKnown() REQUIRES(nodes_mutex_)
 std::vector<EdgeAndNode> Search::GetBestChildrenNoTemperature(Node* parent,
                                                               int count,
                                                               int depth) const {
-  LCTRACE_FUNCTION_SCOPE;
   // Even if Edges is populated at this point, its a race condition to access
   // the node, so exit quickly.
   if (parent->GetN() == 0) return {};
@@ -2165,7 +2163,6 @@ void SolidifyCandidates(SearchWorker& worker, SearchCachedState& state, int tid,
   if (candidates.size() < (state.task_queue_.Size() + 1)) {
     return;
   }
-  LCTRACE_FUNCTION_SCOPE;
   worker.NewMemoryIteration();
   MakeSolidQueue solid_queue;
   MakeSolidList solid_tasks;

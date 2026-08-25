@@ -1283,7 +1283,6 @@ CudaNetworkComputation<DataType>::CudaNetworkComputation(
 
 template <typename DataType>
 CudaNetworkComputation<DataType>::~CudaNetworkComputation() {
-  LCTRACE_FUNCTION_SCOPE;
   network_->ReleaseInputsOutputs(std::move(inputs_outputs_));
 }
 

@@ -1250,7 +1250,6 @@ void ReleaseNodesWork<Types>::Submit() {
   if (released_nodes_.empty()) {
     return;
   }
-  LCTRACE_FUNCTION_SCOPE;
   auto& worker = NodeGarbageCollector<Types>::Instance();
   SpinMutex::Lock lock(worker.mutex_);
   // If this is worker, we have oldest nodes. Keep them at front of the queue.
