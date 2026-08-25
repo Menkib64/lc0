@@ -212,6 +212,10 @@ deps += dependency('absl_flat_hash_map', 'absl', modules:['absl::flat_hash_map']
                    fallback: ['abseil-cpp', 'absl_container_dep'],
                    default_options : ['warning_level=0', 'cpp_std=c++20'])
 
+deps += dependency('libhwy',
+                   include_type: 'system',
+                   fallback: ['highway', 'hwy_dep'])
+
 deps += dependency('threads')
 
 #############################################################################
