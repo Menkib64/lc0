@@ -112,7 +112,7 @@ class BitBoard {
   struct Uin64ToSquare {
     constexpr Square operator()(uint64_t x) { return Square::FromIdx(x); }
   };
-  using Iterator = BitIterator<Square, Uin64ToSquare>;
+  using Iterator = BitIterator<uint64_t, Uin64ToSquare>;
   Iterator begin() const { return board_; }
   Iterator end() const { return 0; }
 

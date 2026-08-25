@@ -28,29 +28,12 @@
 #pragma once
 #include <cstdint>
 #include <iterator>
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
 
 namespace lczero {
 
-inline unsigned long GetLowestBit(std::uint64_t value) {
-#if defined(_MSC_VER) && defined(_WIN64)
-  unsigned long result;
-  _BitScanForward64(&result, value);
-  return result;
-#elif defined(_MSC_VER)
-  unsigned long result;
-  if (value & 0xFFFFFFFF) {
-    _BitScanForward(&result, value);
-  } else {
-    _BitScanForward(&result, value >> 32);
-    result += 32;
-  }
-  return result;
-#else
-  return __builtin_ctzll(value);
-#endif
+template <typename T>
+T GetLowestBit(T value) {
+  return std::countr_zero(value);
 }
 
 enum BoardTransform {
@@ -99,25 +82,35 @@ class BitIterator {
   using pointer = T*;
   using reference = T&;
 
-  BitIterator(std::uint64_t value) : value_(value) {};
+  BitIterator(T value) : value_(value) {};
   bool operator!=(const BitIterator& other) { return value_ != other.value_; }
+  explicit operator bool() const { return value_ != 0; }
 
-  void operator++() { value_ &= (value_ - 1); }
-  T operator*() const { return Convert()(GetLowestBit(value_)); }
+  BitIterator& operator++() {
+    value_ &= (value_ - 1);
+    return *this;
+  }
+  BitIterator operator++(int) {
+    BitIterator tmp = *this;
+    ++(*this);
+    return tmp;
+  }
+  auto operator*() const { return Convert()(std::countr_zero(value_)); }
 
  private:
-  std::uint64_t value_;
+  T value_;
 };
 
+template <typename T>
 class IterateBits {
  public:
-  IterateBits(std::uint64_t value) : value_(value) {}
-  using Iterator = BitIterator<int>;
+  IterateBits(T value) : value_(value) {}
+  using Iterator = BitIterator<T>;
   Iterator begin() { return value_; }
   Iterator end() { return 0; }
 
  private:
-  std::uint64_t value_;
+  T value_;
 };
 
 }  // namespace lczero
