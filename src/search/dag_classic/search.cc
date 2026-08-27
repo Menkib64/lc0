@@ -2596,8 +2596,11 @@ void SearchWorker::GatherMinibatch() {
       // to identify exactly which ones are afterwards and only prune those.
       // This may remove too many items, but hopefully most of the time they
       // will just be added back in the same in the next gather.
-      auto tasks = ScheduleBackupUpdateTasks(
-          *this, search_->state_.task_queue_.Size() + 1, state_.ooobatch_);
+      size_t threads =
+          state_.ooobatch_.size() < search_->state_.task_queue_.Size() * 4
+              ? std::max<size_t>(1, search_->state_.task_queue_.Size())
+              : search_->state_.task_queue_.Size() + 1;
+      auto tasks = ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
       ScheduleCancelTask(collisions_start, collisions_end, false);
       number_out_of_order_ += state_.ooobatch_.size();
       for (auto& task : tasks) {
