@@ -726,8 +726,8 @@ void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
   if (!backend_->uses_cpu_backend_) {
     first_done_.wait(false, std::memory_order_acquire);
     // Use spinloop to reduce wake-up latency.
-    static constexpr size_t kExpectedWaitUs = 1000;
-    MonitorHelper monitor(dataready_, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 1'000'000;
+    MonitorHelper monitor(dataready_, kExpectedWaitNs);
     while (dataready_.load(std::memory_order_acquire) != 0) {
       monitor([](int value) { return value != 0; });
     }

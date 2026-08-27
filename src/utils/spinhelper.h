@@ -45,8 +45,10 @@ namespace lczero {
 static inline void SpinloopPause() {
 #if defined(__x86_64__) || defined(_M_X64)
   _mm_pause();
-#elif defined(_MSC_VER)
-  __asm {}
+#elif defined(__aarch64__) && (defined(__clang__) || defined(__GNUC__))
+  __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__arch64__) && defined(_MSC_VER)
+  __yield();
 #else
   asm volatile("");
 #endif
@@ -83,10 +85,22 @@ static inline uint64_t GetCyclesInUs() {
 #endif
 }
 
-static inline size_t GetMaxCycles(size_t spin_limit_us) {
+static inline size_t GetMaxCycles(size_t spin_limit_ns) {
   // Approximate number of CPU cycles in a microsecond.
   static const size_t kCyclesInUs = GetCyclesInUs();
-  return spin_limit_us * kCyclesInUs;
+  return spin_limit_ns * kCyclesInUs / 1000;
+}
+
+static inline size_t GetThreadYieldLimit() {
+  // Approximate number of nanoseconds to yield a thread.
+  const auto init_yield = [] {
+    const auto hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    const unsigned min_spins = 50'000;
+    const unsigned max_spins = min_spins * 8;
+    return min_spins + (hash % (max_spins - min_spins));
+  };
+  static thread_local size_t kThreadYieldLimit = init_yield();
+  return kThreadYieldLimit;
 }
 
 template <typename Atomic>
@@ -110,30 +124,36 @@ class MonitorHelper {
 #elif defined(_MSC_VER)
   __forceinline
 #endif
-  bool Monitor(Func check, uint64_t start, uint64_t now) const {
+  bool Monitor(Func check, uint64_t start, uint64_t now, bool high_power_state,
+               uint64_t target_cycles) const {
     std::ignore = start;
     std::ignore = now;
+    std::ignore = high_power_state;
+    std::ignore = target_cycles;
 #if defined(__MWAITX__)
     void* addr = const_cast<void*>(static_cast<const void*>(&atomic_));
     static constexpr unsigned kTimeoutFlag =
         0x2;  // Use timeout hint for mwaitx
+    static constexpr unsigned kHighPowerHint = 0xf0;
     const uint64_t elapsed_cycles = now - start;
-    assert(elapsed_cycles < kMaxCycles);
-    const uint64_t time_to_wait = kMaxCycles - elapsed_cycles;
+    assert(elapsed_cycles < target_cycles);
+    const uint64_t time_to_wait = target_cycles - elapsed_cycles;
     _mm_monitorx(addr, 0, 0);
     if (!check(atomic_.load(std::memory_order_relaxed))) {
       return false;
     }
-    _mm_mwaitx(kTimeoutFlag, 0, time_to_wait);
+    _mm_mwaitx(kTimeoutFlag, high_power_state ? kHighPowerHint : 0,
+               time_to_wait);
     return check(atomic_.load(std::memory_order_relaxed));
 #elif defined(__WAITPKG__)
     void* addr = const_cast<void*>(static_cast<const void*>(&atomic_));
-    const uint64_t end = start + kMaxCycles;
+    static constexpr unsigned kHighPowerHint = 0x1;
+    const uint64_t end = start + target_cycles;
     _umonitor(addr);
     if (!check(atomic_.load(std::memory_order_relaxed))) {
       return false;
     }
-    _umwait(0, end);
+    _umwait(high_power_state ? kHighPowerHint : 0, end);
     return check(atomic_.load(std::memory_order_relaxed));
 #elif defined(__aarch64__) && (defined(__clang__) || defined(__GNUC__))
     if (!check(atomic_.load(std::memory_order_relaxed))) {
@@ -141,7 +161,6 @@ class MonitorHelper {
     }
     __asm__ __volatile__("wfe\n\t" : : : "memory");
     return check(atomic_.load(std::memory_order_relaxed));
-
 #else
     if (!check(atomic_.load(std::memory_order_relaxed))) {
       return false;
@@ -154,9 +173,9 @@ class MonitorHelper {
   void Yield() const { std::this_thread::yield(); }
 
  public:
-  MonitorHelper(const Atomic& atomic, int spin_limit_us)
-      : atomic_(atomic), kMaxCycles(GetMaxCycles(spin_limit_us)) {
-    assert(spin_limit_us > 0);
+  MonitorHelper(const Atomic& atomic, int spin_limit_ns)
+      : atomic_(atomic), kMaxCycles(GetMaxCycles(spin_limit_ns)) {
+    assert(spin_limit_ns > 0);
   }
 
   // Wait until the atomic variable satisfies the condition specified by the
@@ -172,10 +191,39 @@ class MonitorHelper {
     }
     uint64_t start_cycles = GetCurrentCpuCycles();
     uint64_t current_cycles = start_cycles;
-    PrepareForMonitor();
-    while (Monitor(check, start_cycles, current_cycles)) {
+    const size_t kBusyWaitCycles = GetMaxCycles(500);
+    const size_t kHighPowerStateWait = GetMaxCycles(10'000);
+    const size_t kYieldWaitCycles =
+        std::max(kMaxCycles, GetMaxCycles(GetThreadYieldLimit()));
+#if defined(__WAITPKG__)
+    // Intel has consistent low cycle wake ups and higher power states. We want
+    // to use umonitor/umwait for all spin limits to help SMT performance.
+    const bool kUseWaitPkg = true;
+#else
+    const bool kUseWaitPkg = false;
+#endif
+    if (kMaxCycles < kBusyWaitCycles && !kUseWaitPkg) {
+      // Use busy waiting for very short spin limits, as the wake-up latency and
+      // random timer delays are problem for very short spin limits. Less than
+      // about 2000 cycles is likely too short.
+      for (size_t i = 0; i < 32; ++i) {
+        if (!check(atomic_.load(std::memory_order_relaxed))) {
+          return;
+        }
+        SpinloopPause();
+      }
       current_cycles = GetCurrentCpuCycles();
-      if (current_cycles - start_cycles >= kMaxCycles) {
+    }
+    PrepareForMonitor();
+    bool high_power_state = !kUseWaitPkg && kMaxCycles < kHighPowerStateWait;
+    while (Monitor(check, start_cycles, current_cycles, high_power_state,
+                   high_power_state ? kHighPowerStateWait : kYieldWaitCycles)) {
+      current_cycles = GetCurrentCpuCycles();
+      if (high_power_state &&
+          current_cycles - start_cycles >= kHighPowerStateWait) {
+        high_power_state = false;
+      }
+      if (current_cycles - start_cycles >= kYieldWaitCycles) {
         // Wait is taking longer that expected, yield to make sure lock holders
         // gets scheduled if it isn't running currently.
         Yield();

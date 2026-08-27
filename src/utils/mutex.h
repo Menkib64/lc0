@@ -185,19 +185,9 @@ class CAPABILITY("mutex") SpinMutex {
 
  private:
   void SpinMutexSlowLock() {
-    // Slow contention path. We use random spin count with occasional yield to
-    // avoid starvation.
-    const auto get_spin_count = []() {
-      const auto hash =
-          std::hash<std::thread::id>{}(std::this_thread::get_id());
-      const unsigned min_spins = 8;
-      const unsigned max_spins = min_spins + 16;
-      return min_spins + (hash % (max_spins - min_spins));
-    };
 
-    static const thread_local unsigned spin_time_us = get_spin_count();
-
-    MonitorHelper monitor(mutex_, spin_time_us);
+    static constexpr size_t kExpectedSpinTimeNs = 400;
+    MonitorHelper monitor(mutex_, kExpectedSpinTimeNs);
 
     while (true) {
       monitor([](int value) { return value != 0; });

@@ -400,8 +400,8 @@ class MakeSolidQueue {
   // ready.
   const ChangeType* Get() const {
     assert(queue_);
-    static constexpr size_t kExpectedWaitUs = 16;
-    MonitorHelper monitor(inserted_, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 8'000;
+    MonitorHelper monitor(inserted_, kExpectedWaitNs);
     do {
       monitor([this](size_t inserted) { return inserted != total_changes_; });
     } while (inserted_.load(std::memory_order_acquire) != total_changes_);
@@ -438,8 +438,8 @@ class MakeSolidTask final : public TaskQueue::PickTask {
   }
 
   void Wait(int tid) const override {
-    static constexpr size_t kExpectedWaitUs = 1;
-    MonitorHelper monitor(completed_, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 1'000;
+    MonitorHelper monitor(completed_, kExpectedWaitNs);
     while (!completed_.load(std::memory_order_acquire)) {
       monitor([this](bool c) { return !c && worker_.IsTasksIdle(); });
       worker_.ProcessTask(tid);
@@ -472,8 +472,8 @@ class UpdatePathPointers : public TaskQueue::PickTask {
       : queue_(queue), state_(state), tid_(tid), start_(start), size_(size) {}
 
   void Wait(int tid) const override {
-    static constexpr size_t kExpectedWaitUs = 20;
-    MonitorHelper monitor(completed_, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 20'000;
+    MonitorHelper monitor(completed_, kExpectedWaitNs);
     while (!completed_.load(std::memory_order_acquire)) {
       monitor(
           [this](bool c) { return !c && state_.task_queue_.IsTasksIdle(); });
@@ -753,8 +753,8 @@ TaskQueue::PickTask* TaskQueue::PickTaskToProcess() {
   if (nta != tc) {
     auto& bucket = PickingTaskIndex(picking_tasks_, nta);
     const PickTask* task;
-    static constexpr size_t kExpectedWaitUs = 1;
-    MonitorHelper monitor(bucket, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 200;
+    MonitorHelper monitor(bucket, kExpectedWaitNs);
     // Scheduling side first reserves region to write pointers. We have to wait
     // until pointer can be read from the bucket. Bucket has to be set back to
     // nullptr when read. Scheduling can write a new pointer to the bucket only
@@ -822,8 +822,8 @@ void TaskQueue::SubmitTasks(TaskVector& tasks, int tid) {
     auto& bucket = PickingTaskIndex(picking_tasks_, (tc + i) % capacity);
     // Make sure that previous read has completed.
     const PickTask* expected;
-    static constexpr size_t kExpectedWaitUs = 1;
-    MonitorHelper monitor(bucket, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 200;
+    MonitorHelper monitor(bucket, kExpectedWaitNs);
     do {
       monitor([](const PickTask* t) { return t != nullptr; });
       expected = nullptr;
@@ -859,8 +859,8 @@ void TaskQueue::SubmitTask(TaskType& task, int tid) {
   assert(nta != (tc + 1) % size);
   auto& bucket = PickingTaskIndex(picking_tasks_, tc);
   const PickTask* expected;
-  static constexpr size_t kExpectedWaitUs = 1;
-  MonitorHelper monitor(bucket, kExpectedWaitUs);
+  static constexpr size_t kExpectedWaitNs = 200;
+  MonitorHelper monitor(bucket, kExpectedWaitNs);
   do {
     monitor([](const PickTask* t) { return t != nullptr; });
     expected = nullptr;
@@ -913,12 +913,12 @@ void TaskQueue::RunTasks(int tid) {
   while (true) {
     int nta = 0;
     int tc = 0;
-    static constexpr size_t kExpectedFirstWaitUs = 400;
-    static constexpr size_t kExpectedWaitUs = 40;
+    static constexpr size_t kExpectedFirstWaitNs = 400'000;
+    static constexpr size_t kExpectedWaitNs = 20'000;
     bool first_iteration = true;
     do {
-      MonitorHelper monitor(task_count_, first_iteration ? kExpectedFirstWaitUs
-                                                         : kExpectedWaitUs);
+      MonitorHelper monitor(task_count_, first_iteration ? kExpectedFirstWaitNs
+                                                         : kExpectedWaitNs);
       first_iteration = false;
       monitor([this](int packed) {
         auto [_, nta, tc] = ReadTaskCount(packed);
@@ -1218,8 +1218,8 @@ void Search::SendUciInfo(const classic::IterationStats& stats)
 }
 
 void SearchWorker::MaybeOutputInfoTask::Wait(int tid) const {
-  static constexpr size_t kExpectedWaitUs = 5;
-  MonitorHelper monitor(done_, kExpectedWaitUs);
+  static constexpr size_t kExpectedWaitNs = 5'000;
+  MonitorHelper monitor(done_, kExpectedWaitNs);
   while (!done_.load(std::memory_order_acquire)) {
     monitor([this](int done) { return !done && worker_.IsTasksIdle(); });
     worker_.ProcessTask(tid);
@@ -2070,8 +2070,8 @@ void SearchWorker::PickTaskCancelCollisions::Reset(int start_idx, int end_idx,
 }
 
 void SearchWorker::PickTaskCancelCollisions::Wait(int tid) const {
-  static constexpr size_t kExpectedWaitUs = 10;
-  MonitorHelper monitor(completed_, kExpectedWaitUs);
+  static constexpr size_t kExpectedWaitNs = 10'000;
+  MonitorHelper monitor(completed_, kExpectedWaitNs);
   while (!completed_.load(std::memory_order_acquire)) {
     monitor([this](bool c) { return !c && worker_.IsTasksIdle(); });
     worker_.ProcessTask(tid);
@@ -2310,8 +2310,8 @@ class BackupTask final : public TaskQueue::PickTask {
       : worker_(worker), batch_(batch), start_(start), size_(size) {}
 
   void Wait(int tid) const override {
-    static constexpr size_t kExpectedWaitUs = 80;
-    MonitorHelper monitor(done_, kExpectedWaitUs);
+    static constexpr size_t kExpectedWaitNs = 80'000;
+    MonitorHelper monitor(done_, kExpectedWaitNs);
     while (done_.load(std::memory_order_acquire) == 0) {
       monitor([this](bool done) { return !done && worker_.IsTasksIdle(); });
       worker_.ProcessTask(tid);
@@ -2679,8 +2679,8 @@ void SearchWorker::SubmitTasks(TaskType& tasks) {
 // Check for any outstanding gather tasks. Task objects aren't tracked so we
 // need a shared counter to know when all of them are done.
 void SearchWorker::WaitForTasks() {
-  static constexpr size_t kExpectedWaitUs = 40;
-  MonitorHelper monitor(outstanding_tasks_, kExpectedWaitUs);
+  static constexpr size_t kExpectedWaitNs = 40'000;
+  MonitorHelper monitor(outstanding_tasks_, kExpectedWaitNs);
   while (outstanding_tasks_.load(std::memory_order_acquire)) {
     monitor([this](int value) {
       return value != 0 && search_->state_.task_queue_.IsTasksIdle();
