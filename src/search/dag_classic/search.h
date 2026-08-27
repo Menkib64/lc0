@@ -234,13 +234,17 @@ class TaskQueue {
   bool ShouldRun(State s) const;
 
   std::vector<std::thread> task_threads_;
-  alignas(kCacheLineSize) WaitableAtomic<State> state_ = State::kSleeping;
   // Size is the smallest power of two which has enough space to hold all child
   // nodes in any positions. Typically there is much less visited children. The
   // bigger size helps avoid cache line contention when scaling to more threads.
   alignas(kCacheLineSize) std::array<PickTaskPtr, 256> picking_tasks_;
   // A packed atomic. LSB half is task_count_. MSB half is tasks_taken_.
   alignas(kCacheLineSize) std::atomic<int> task_count_ = 0;
+  // The state of the task queue. It is used to wake up sleeping threads when
+  // new tasks are about to be submitted. It must be on the same cache line as
+  // task_count_ to allow monitor sleep to check changes on both. State should
+  // be rarely changing when tasks are doing work.
+  WaitableAtomic<State> state_ = State::kSleeping;
   alignas(kCacheLineSize) std::atomic<int> active_users_ = 0;
 };
 
@@ -708,6 +712,7 @@ class SearchWorker {
 
   // Process a queued task.
   void ProcessTask(int tid);
+  bool IsTasksIdle() const;
   template <typename TaskType>
   void SubmitTasks(TaskType& tasks);
 

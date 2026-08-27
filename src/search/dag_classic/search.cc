@@ -400,9 +400,11 @@ class MakeSolidQueue {
   // ready.
   const ChangeType* Get() const {
     assert(queue_);
-    while (inserted_.load(std::memory_order_acquire) != total_changes_) {
-      SpinloopPause();
-    }
+    static constexpr size_t kExpectedWaitUs = 16;
+    MonitorHelper monitor(inserted_, kExpectedWaitUs);
+    do {
+      monitor([this](size_t inserted) { return inserted != total_changes_; });
+    } while (inserted_.load(std::memory_order_acquire) != total_changes_);
     return queue_;
   }
 
@@ -436,7 +438,10 @@ class MakeSolidTask final : public TaskQueue::PickTask {
   }
 
   void Wait(int tid) const override {
+    static constexpr size_t kExpectedWaitUs = 1;
+    MonitorHelper monitor(completed_, kExpectedWaitUs);
     while (!completed_.load(std::memory_order_acquire)) {
+      monitor([this](bool c) { return !c && worker_.IsTasksIdle(); });
       worker_.ProcessTask(tid);
     }
   }
@@ -467,7 +472,11 @@ class UpdatePathPointers : public TaskQueue::PickTask {
       : queue_(queue), state_(state), tid_(tid), start_(start), size_(size) {}
 
   void Wait(int tid) const override {
+    static constexpr size_t kExpectedWaitUs = 20;
+    MonitorHelper monitor(completed_, kExpectedWaitUs);
     while (!completed_.load(std::memory_order_acquire)) {
+      monitor(
+          [this](bool c) { return !c && state_.task_queue_.IsTasksIdle(); });
       state_.task_queue_.ProcessTask(tid);
     }
   }
@@ -744,13 +753,15 @@ TaskQueue::PickTask* TaskQueue::PickTaskToProcess() {
   if (nta != tc) {
     auto& bucket = PickingTaskIndex(picking_tasks_, nta);
     const PickTask* task;
+    static constexpr size_t kExpectedWaitUs = 1;
+    MonitorHelper monitor(bucket, kExpectedWaitUs);
     // Scheduling side first reserves region to write pointers. We have to wait
     // until pointer can be read from the bucket. Bucket has to be set back to
     // nullptr when read. Scheduling can write a new pointer to the bucket only
     // when it is nullptr.
-    while (!(task = bucket.exchange(nullptr, std::memory_order_acquire))) {
-      SpinloopPause();
-    }
+    do {
+      monitor([](const PickTask* t) { return t == nullptr; });
+    } while (!(task = bucket.exchange(nullptr, std::memory_order_acquire)));
     return const_cast<PickTask*>(task);
   }
   return nullptr;
@@ -811,10 +822,10 @@ void TaskQueue::SubmitTasks(TaskVector& tasks, int tid) {
     auto& bucket = PickingTaskIndex(picking_tasks_, (tc + i) % capacity);
     // Make sure that previous read has completed.
     const PickTask* expected;
+    static constexpr size_t kExpectedWaitUs = 1;
+    MonitorHelper monitor(bucket, kExpectedWaitUs);
     do {
-      while (bucket.load(std::memory_order_relaxed)) {
-        SpinloopPause();
-      }
+      monitor([](const PickTask* t) { return t != nullptr; });
       expected = nullptr;
     } while (!bucket.compare_exchange_strong(
         expected, static_cast<const PickTask*>(&*task),
@@ -848,10 +859,10 @@ void TaskQueue::SubmitTask(TaskType& task, int tid) {
   assert(nta != (tc + 1) % size);
   auto& bucket = PickingTaskIndex(picking_tasks_, tc);
   const PickTask* expected;
+  static constexpr size_t kExpectedWaitUs = 1;
+  MonitorHelper monitor(bucket, kExpectedWaitUs);
   do {
-    while (bucket.load(std::memory_order_acquire)) {
-      SpinloopPause();
-    }
+    monitor([](const PickTask* t) { return t != nullptr; });
     expected = nullptr;
   } while (!bucket.compare_exchange_strong(expected,
                                            static_cast<const PickTask*>(&task),
@@ -890,11 +901,6 @@ void TaskQueue::DeactivateTasks() {
   }
 }
 
-namespace {
-static constexpr auto kSpinsToCheckClock = 512;
-static constexpr auto kSpinStartLimit = std::chrono::microseconds(100);
-}  // namespace
-
 bool TaskQueue::ShouldRun(State s) const {
   if (s == kExiting) return false;
   if (s == kSleeping) return false;
@@ -907,32 +913,19 @@ void TaskQueue::RunTasks(int tid) {
   while (true) {
     int nta = 0;
     int tc = 0;
-    auto spin_start = std::chrono::high_resolution_clock::now();
-    int spins = 0;
-    bool work_done = false;
+    static constexpr size_t kExpectedFirstWaitUs = 400;
+    static constexpr size_t kExpectedWaitUs = 40;
+    bool first_iteration = true;
     do {
-      work_done |= ProcessTaskWorker(tid);
-      spins++;
-      if (spins >= kSpinsToCheckClock) {
-        auto now = std::chrono::high_resolution_clock::now();
-        if (work_done) {
-          spins = 0;
-          work_done = false;
-          spin_start = now;
-          continue;
-        }
-        if (now - spin_start < kSpinStartLimit) {
-          spins = 0;
-          continue;
-        }
-        std::this_thread::yield();
-        spin_start = std::chrono::high_resolution_clock::now();
-        spins = 0;
-      } else {
-        SpinloopPause();
-      }
+      MonitorHelper monitor(task_count_, first_iteration ? kExpectedFirstWaitUs
+                                                         : kExpectedWaitUs);
+      first_iteration = false;
+      monitor([this](int packed) {
+        auto [_, nta, tc] = ReadTaskCount(packed);
+        return nta == tc && state_.load(std::memory_order_relaxed) == kRunning;
+      });
+      ProcessTaskWorker(tid);
     } while (ShouldRun(state_.load(std::memory_order_relaxed)));
-    spins = 0;
     // Looks like sleep time.
     // Refresh them now we have the lock.
     std::tie(std::ignore, nta, tc) = ReadTaskCount(task_count_);
@@ -1225,7 +1218,10 @@ void Search::SendUciInfo(const classic::IterationStats& stats)
 }
 
 void SearchWorker::MaybeOutputInfoTask::Wait(int tid) const {
+  static constexpr size_t kExpectedWaitUs = 5;
+  MonitorHelper monitor(done_, kExpectedWaitUs);
   while (!done_.load(std::memory_order_acquire)) {
+    monitor([this](int done) { return !done && worker_.IsTasksIdle(); });
     worker_.ProcessTask(tid);
   }
 }
@@ -2074,9 +2070,11 @@ void SearchWorker::PickTaskCancelCollisions::Reset(int start_idx, int end_idx,
 }
 
 void SearchWorker::PickTaskCancelCollisions::Wait(int tid) const {
+  static constexpr size_t kExpectedWaitUs = 10;
+  MonitorHelper monitor(completed_, kExpectedWaitUs);
   while (!completed_.load(std::memory_order_acquire)) {
+    monitor([this](bool c) { return !c && worker_.IsTasksIdle(); });
     worker_.ProcessTask(tid);
-    SpinloopPause();
   }
 }
 
@@ -2190,21 +2188,11 @@ void SolidifyCandidates(SearchWorker& worker, SearchCachedState& state, int tid,
 
 class ResetComputationTask final : public TaskQueue::PickTask {
  public:
-  ResetComputationTask(SearchWorker& worker,
-                       std::unique_ptr<BackendComputation>&& computation)
-      : worker_(worker), computation_(std::move(computation)) {}
-
-  void Wait(int tid) const override {
-    while (done_.load(std::memory_order_acquire) == 0) {
-      worker_.ProcessTask(tid);
-    }
-  }
+  ResetComputationTask(std::unique_ptr<BackendComputation>&& computation)
+      : computation_(std::move(computation)) {}
 
  private:
-  void DoTask(int tid) override {
-    ResetComputation(tid);
-    done_.store(1, std::memory_order_release);
-  }
+  void DoTask(int tid) override { ResetComputation(tid); }
 
   void ResetComputation(int) {
     LCTRACE_FUNCTION_SCOPE;
@@ -2212,9 +2200,7 @@ class ResetComputationTask final : public TaskQueue::PickTask {
   }
 
  private:
-  SearchWorker& worker_;
   std::unique_ptr<BackendComputation> computation_;
-  std::atomic<int> done_{0};
 };
 }  // namespace
 
@@ -2324,7 +2310,10 @@ class BackupTask final : public TaskQueue::PickTask {
       : worker_(worker), batch_(batch), start_(start), size_(size) {}
 
   void Wait(int tid) const override {
+    static constexpr size_t kExpectedWaitUs = 80;
+    MonitorHelper monitor(done_, kExpectedWaitUs);
     while (done_.load(std::memory_order_acquire) == 0) {
+      monitor([this](bool done) { return !done && worker_.IsTasksIdle(); });
       worker_.ProcessTask(tid);
     }
   }
@@ -2676,6 +2665,9 @@ void SearchWorker::CompleteTask() {
 void SearchWorker::ProcessTask(int tid) {
   search_->state_.task_queue_.ProcessTask(tid);
 }
+bool SearchWorker::IsTasksIdle() const {
+  return search_->state_.task_queue_.IsTasksIdle();
+}
 template <typename TaskType>
 void SearchWorker::SubmitTasks(TaskType& tasks) {
   search_->state_.task_queue_.SubmitTasks(tasks, tid_);
@@ -2684,9 +2676,13 @@ void SearchWorker::SubmitTasks(TaskType& tasks) {
 // Check for any outstanding gather tasks. Task objects aren't tracked so we
 // need a shared counter to know when all of them are done.
 void SearchWorker::WaitForTasks() {
+  static constexpr size_t kExpectedWaitUs = 40;
+  MonitorHelper monitor(outstanding_tasks_, kExpectedWaitUs);
   while (outstanding_tasks_.load(std::memory_order_acquire)) {
+    monitor([this](int value) {
+      return value != 0 && search_->state_.task_queue_.IsTasksIdle();
+    });
     ProcessTask(tid_);
-    SpinloopPause();
   }
 }
 
@@ -3489,7 +3485,7 @@ bool SearchWorker::DoBackupUpdate() {
 
   // Always do the reset task in the main thread because tcmalloc performs much
   // better if frees happen in the same thread as the allocations.
-  ResetComputationTask reset_task(*this, std::move(computation_));
+  ResetComputationTask reset_task(std::move(computation_));
   reset_task(tid_);
 
   for (auto& task : tasks) {

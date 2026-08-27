@@ -37,6 +37,7 @@
 #endif
 
 #include "utils/cppattributes.h"
+#include "utils/spinhelper.h"
 
 #ifndef __has_feature
 #define __has_feature(x) 0
@@ -137,16 +138,6 @@ class CAPABILITY("mutex") SharedMutex {
   std::shared_timed_mutex mutex_;
 };
 
-static inline void SpinloopPause() {
-#if defined(__x86_64__) || defined(_M_X64)
-  _mm_pause();
-#elif defined(_MSC_VER)
-  __asm {}
-#else
-  asm volatile("");
-#endif
-}
-
 // A very simple spin lock.
 class CAPABILITY("mutex") SpinMutex {
  public:
@@ -172,6 +163,11 @@ class CAPABILITY("mutex") SpinMutex {
   ~SpinMutex() { __tsan_mutex_destroy(&mutex_, 0); }
 #endif
 
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
   void lock() ACQUIRE() {
 #if TSAN_BUILD
     __tsan_mutex_pre_lock(&mutex_, 0);
@@ -184,20 +180,27 @@ class CAPABILITY("mutex") SpinMutex {
 #endif
       return;
     }
+    SpinMutexSlowLock();
+  }
+
+ private:
+  void SpinMutexSlowLock() {
     // Slow contention path. We use random spin count with occasional yield to
     // avoid starvation.
-    unsigned spins = 0;
     const auto get_spin_count = []() {
       const auto hash =
           std::hash<std::thread::id>{}(std::this_thread::get_id());
-      const unsigned min_spins = 512;
-      const unsigned max_spins = min_spins + 1024;
+      const unsigned min_spins = 8;
+      const unsigned max_spins = min_spins + 16;
       return min_spins + (hash % (max_spins - min_spins));
     };
 
-    static const thread_local unsigned spin_count = get_spin_count();
+    static const thread_local unsigned spin_time_us = get_spin_count();
+
+    MonitorHelper monitor(mutex_, spin_time_us);
 
     while (true) {
+      monitor([](int value) { return value != 0; });
       int val = 0;
       if (mutex_.compare_exchange_weak(val, 1, std::memory_order_acquire)) {
 #if TSAN_BUILD
@@ -205,17 +208,15 @@ class CAPABILITY("mutex") SpinMutex {
 #endif
         break;
       }
-      ++spins;
-      // Help avoid complete resource starvation by yielding occasionally if
-      // needed.
-      if (spins == spin_count) {
-        std::this_thread::yield();
-        spins = 0;
-      } else {
-        SpinloopPause();
-      }
     }
   }
+
+ public:
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
   bool try_lock() TRY_ACQUIRE(true) {
 #if TSAN_BUILD
     __tsan_mutex_pre_lock(&mutex_, __tsan_mutex_try_lock);
@@ -233,6 +234,12 @@ class CAPABILITY("mutex") SpinMutex {
 #endif
     return false;
   }
+
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
   void unlock() RELEASE() {
 #if TSAN_BUILD
     __tsan_mutex_pre_unlock(&mutex_, 0);
