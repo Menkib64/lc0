@@ -3575,10 +3575,10 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
 
   const auto& nl = n->GetLowNode();
   using MutexType = std::remove_cvref_t<decltype(nl->GetMutex())>;
-  std::unique_lock<MutexType> low_lock;
+  std::unique_lock<MutexType> outer_low_lock;
   // The low node must be locked first if we have a low node.
   if (nl) {
-    low_lock = std::unique_lock<MutexType>(nl->GetMutex());
+    outer_low_lock = std::unique_lock<MutexType>(nl->GetMutex());
   }
 
   // We follow the Backup path down to lock node next. It must be locked before
@@ -3609,7 +3609,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       // lets node picking select them after NN evaluation is done.
       // No need to keep locks for CancelScoreUpdate because it uses atomic
       // operations.
-      low_lock.unlock();
+      outer_low_lock.unlock();
       node_lock.unlock();
       for (auto it = path.crbegin(); it != path.crend(); ++it) {
         std::get<0>(*it)->CancelScoreUpdate(1);
@@ -3656,8 +3656,8 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     }
   }
 
-  if (low_lock.owns_lock()) {
-    low_lock.unlock();
+  if (outer_low_lock.owns_lock()) [[likely]] {
+    outer_low_lock.unlock();
   }
 
   // Backup V value up to a root. After 1 visit, V = Q.
@@ -3673,7 +3673,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     auto [p, pr, pm] = *it;
     const auto& pl = p->GetLowNode();
 
-    low_lock = std::unique_lock<MutexType>(pl->GetMutex());
+    auto low_lock = std::unique_lock<MutexType>(pl->GetMutex());
     // Node must be unlocked after LowNode has been locked to avoid another
     // thread overtaking this thread using the same path which would make stack
     // variable state invalid.
@@ -3710,8 +3710,6 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     MaybeAdjustForTerminalOrTransposition(p, pl, v, d, m, weight_to_fix,
                                           v_delta, d_delta, m_delta,
                                           update_parent_bounds);
-
-    low_lock.unlock();
 
     n = p;
     nr = pr;

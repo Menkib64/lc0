@@ -42,6 +42,11 @@
 
 namespace lczero {
 
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
 static inline void SpinloopPause() {
 #if defined(__x86_64__) || defined(_M_X64)
   _mm_pause();
@@ -54,6 +59,11 @@ static inline void SpinloopPause() {
 #endif
 }
 
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
 static inline uint64_t GetCurrentCpuCycles() {
 #if defined(__x86_64__) || defined(_MSC_VER)
   return __rdtsc();
@@ -85,12 +95,22 @@ static inline uint64_t GetCyclesInUs() {
 #endif
 }
 
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
 static inline size_t GetMaxCycles(size_t spin_limit_ns) {
   // Approximate number of CPU cycles in a microsecond.
   static const size_t kCyclesInUs = GetCyclesInUs();
   return spin_limit_ns * kCyclesInUs / 1000;
 }
 
+#if defined(__clang__) || defined(__GNUC__)
+  [[gnu::always_inline]]
+#elif defined(_MSC_VER)
+  __forceinline
+#endif
 static inline size_t GetThreadYieldLimit() {
   // Approximate number of nanoseconds to yield a thread.
   const auto init_yield = [] {
@@ -162,10 +182,12 @@ class MonitorHelper {
     __asm__ __volatile__("wfe\n\t" : : : "memory");
     return check(atomic_.load(std::memory_order_relaxed));
 #else
-    if (!check(atomic_.load(std::memory_order_relaxed))) {
-      return false;
+    for (size_t i = 0; i < 32; ++i) {
+      SpinloopPause();
+      if (!check(atomic_.load(std::memory_order_relaxed))) {
+        return false;
+      }
     }
-    SpinloopPause();
     return true;
 #endif
   }
@@ -182,13 +204,15 @@ class MonitorHelper {
   // check function. Check function should return true if monitoring should
   // continue, and false if the condition is satisfied.
   template <typename Func>
-#if defined(__clang__) || defined(__GNUC__)
-  [[gnu::always_inline]]
-#endif
   void operator()(Func check) const {
     if (!check(atomic_.load(std::memory_order_relaxed))) {
       return;
     }
+    MonitorWait(check);
+  }
+ private:
+  template <typename Func>
+  void MonitorWait(Func check) const {
     uint64_t start_cycles = GetCurrentCpuCycles();
     uint64_t current_cycles = start_cycles;
     const size_t kBusyWaitCycles = GetMaxCycles(500);
@@ -207,10 +231,10 @@ class MonitorHelper {
       // random timer delays are problem for very short spin limits. Less than
       // about 2000 cycles is likely too short.
       for (size_t i = 0; i < 32; ++i) {
+        SpinloopPause();
         if (!check(atomic_.load(std::memory_order_relaxed))) {
           return;
         }
-        SpinloopPause();
       }
       current_cycles = GetCurrentCpuCycles();
     }
@@ -232,7 +256,6 @@ class MonitorHelper {
     }
   }
 
- private:
   const Atomic& atomic_;
   const size_t kMaxCycles;
 };

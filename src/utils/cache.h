@@ -188,7 +188,7 @@ class HashKeyedCache {
   }
 
   HashType AllocateHash(size_t capacity, size_t shards) const {
-    if (capacity == 0) return nullptr;
+    if (capacity == 0) [[unlikely]] return nullptr;
     assert(capacity >= kMinimumSafeCapacity);
     size_t bytes = sizeof(Bucket) * capacity + sizeof(Shard) * shards;
     assert(bytes % kCacheLineSize == 0);
@@ -289,7 +289,7 @@ class HashKeyedCache {
   // the new value is moved to cache.
   template <typename... Args>
   std::pair<pointer, bool> Emplace(uint64_t key, Args&&... args) {
-    if (capacity_ == 0) return {nullptr, false};
+    if (capacity_ == 0) [[unlikely]] return {nullptr, false};
     auto& bucket = GetBucket(key);
     SpinMutex::Lock lock(GetShardMutex(bucket));
     uint8_t key_low_byte = GetKeyLowByte(key);
@@ -332,7 +332,7 @@ class HashKeyedCache {
   // Checks whether a key exists. Doesn't pin. Of course the next moment the
   // key may be evicted.
   bool ContainsKey(uint64_t key) {
-    if (capacity_ == 0) return false;
+    if (capacity_ == 0) [[unlikely]] return false;
 
     Bucket& bucket = GetBucket(key);
     SpinMutex::Lock lock(GetShardMutex(bucket));
@@ -342,7 +342,7 @@ class HashKeyedCache {
 
   // Looks up and pins the element by key. Returns nullptr if not found.
   pointer LookupAndPin(uint64_t key) {
-    if (capacity_ == 0) return nullptr;
+    if (capacity_ == 0) [[unlikely]] return nullptr;
 
     Bucket& bucket = GetBucket(key);
     SpinMutex::Lock lock(GetShardMutex(bucket));
