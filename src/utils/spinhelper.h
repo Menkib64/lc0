@@ -239,7 +239,13 @@ class MonitorHelper {
       current_cycles = GetCurrentCpuCycles();
     }
     PrepareForMonitor();
-    bool high_power_state = !kUseWaitPkg && kMaxCycles < kHighPowerStateWait;
+    size_t elapsed_cycles = current_cycles - start_cycles;
+    bool high_power_state = !kUseWaitPkg && kMaxCycles < kHighPowerStateWait &&
+                            elapsed_cycles < kHighPowerStateWait;
+    if (elapsed_cycles >= kYieldWaitCycles) {
+      Yield();
+      current_cycles = start_cycles = GetCurrentCpuCycles();
+    }
     while (Monitor(check, start_cycles, current_cycles, high_power_state,
                    high_power_state ? kHighPowerStateWait : kYieldWaitCycles)) {
       current_cycles = GetCurrentCpuCycles();
