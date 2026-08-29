@@ -26,6 +26,7 @@
 */
 
 #include "neural/memcache.h"
+#include <atomic>
 
 #include "neural/shared_params.h"
 #include "utils/atomic.h"
@@ -66,8 +67,9 @@ struct CachedValue {
   }
 
   void reset() {
-    assert(state.load(std::memory_order_acquire) == UNITIALIZED ||
-           state.load(std::memory_order_acquire) == READY);
+    assert(state.load(std::memory_order_relaxed) == UNITIALIZED ||
+           state.load(std::memory_order_relaxed) == NOT_QUEUED ||
+           state.load(std::memory_order_relaxed) == READY);
     p.reset();
     state.store(UNITIALIZED, std::memory_order_release);
   }
@@ -82,6 +84,8 @@ struct CachedValue {
   enum State {
     UNITIALIZED,
     NOT_QUEUED,  // Initial state before NN submission.
+    PREPARED,    // Prepared to submit to NN. It might be cancelled if minibatch
+                 // is full.
     NO_WAITERS,  // One thread has taken this position to be evaluated. None is
                  // yet waiting for the result.
     WAITERS,     // Another thread is waiting for results. Setting READY state
@@ -183,8 +187,15 @@ class MemCacheComputation : public BackendComputation {
          (cached->p && cached->num_moves == pos.legal_moves.size()))) {
       value.reset();
       auto state = cached->state.load(std::memory_order_acquire);
-      while (state == CachedValue::NOT_QUEUED) {
-        if (cached->state.compare_exchange_weak(state, CachedValue::NO_WAITERS,
+      while (state == CachedValue::NOT_QUEUED || state == CachedValue::PREPARED) {
+        if (state == CachedValue::PREPARED) {
+          MonitorHelper monitor(cached->state, 1000);
+          monitor([](CachedValue::State s) {
+              return s == CachedValue::PREPARED;
+              });
+        }
+        state = CachedValue::NOT_QUEUED;
+        if (cached->state.compare_exchange_weak(state, CachedValue::PREPARED,
                                                 std::memory_order_acq_rel)) {
           to_be_queued = true;
           break;
@@ -210,16 +221,33 @@ class MemCacheComputation : public BackendComputation {
           value->p ? std::span<float>{value->p.get(), pos.legal_moves.size()}
                    : std::span<float>{}};
     } else {
-      assert(cached->state.load(std::memory_order_acquire) != CachedValue::UNITIALIZED);
+      assert(cached->state.load(std::memory_order_acquire) !=
+             CachedValue::UNITIALIZED);
+    }
+
+    // If another thread is already computing the value, we'll fetch it in
+    // ComputeBlocking.
+    AddInputResult rv = AddInputResult::FETCHED_DELAYED;
+    if (to_be_queued) {
+      rv = wrapped_computation_->AddInput(pos, result_ptr);
+    }
+    if (rv == AddInputResult::MINIBATCH_FULL) {
+      // Cancel the queued state if minibatch is full.
+      if (cached) {
+        assert(cached->state.load(std::memory_order_relaxed) ==
+               CachedValue::PREPARED);
+        cached->state.store(CachedValue::NOT_QUEUED, std::memory_order_release);
+      }
+      return rv;
+    }
+    if (cached && to_be_queued) {
+      assert(cached->state.load(std::memory_order_relaxed) ==
+             CachedValue::PREPARED);
+      cached->state.store(CachedValue::NO_WAITERS, std::memory_order_release);
     }
     entries_.emplace_back(
         Entry{cached, std::move(value), result, to_be_queued});
-    if (!to_be_queued) {
-      // Another thread is already computing the value, we'll fetch it in
-      // ComputeBlocking.
-      return AddInputResult::FETCHED_DELAYED;
-    }
-    return wrapped_computation_->AddInput(pos, result_ptr);
+    return rv;
   }
 
   virtual void ComputeBlocking(ComputationCallback callback) override {
@@ -242,6 +270,8 @@ class MemCacheComputation : public BackendComputation {
           CachedValueToEvalResult(*lock, entry.result_ptr);
           auto state = lock->state.exchange(CachedValue::READY,
                                             std::memory_order_release);
+          assert(state == CachedValue::NO_WAITERS ||
+                 state == CachedValue::WAITERS);
           // Wake up waiters if there are any,
           if (state == CachedValue::WAITERS) {
             lock->state.notify_all();
@@ -256,6 +286,9 @@ class MemCacheComputation : public BackendComputation {
         auto& lock = entry.cached;
         assert(lock);
         auto state = lock->state.load(std::memory_order_acquire);
+        assert(state == CachedValue::NO_WAITERS ||
+               state == CachedValue::WAITERS ||
+               state == CachedValue::READY);
         // Make sure writing side knows about waiters
         if (state == CachedValue::NO_WAITERS) {
           lock->state.compare_exchange_strong(state, CachedValue::WAITERS,

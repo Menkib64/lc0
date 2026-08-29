@@ -543,7 +543,6 @@ const OptionId BaseSearchParams::kSolidTreeThresholdId{
 void BaseSearchParams::Populate(OptionsParser* options) {
   // Here the uci optimized defaults" are set.
   // Many of them are overridden with training specific values in tournament.cc.
-  options->Add<IntOption>(kMiniBatchSizeId, 0, 1024) = 0;
   options->Add<FloatOption>(kCpuctId, 0.0f, 100.0f) = 1.745f;
   options->Add<FloatOption>(kCpuctAtRootId, 0.0f, 100.0f) = 1.745f;
   options->Add<FloatOption>(kCpuctBaseId, 1.0f, 1000000000.0f) = 38739.0f;
@@ -675,7 +674,7 @@ BaseSearchParams::BaseSearchParams(const OptionsDict& options)
       kSyzygyFastPlay(options.Get<bool>(kSyzygyFastPlayId)),
       kHistoryFill(EncodeHistoryFill(
           options.Get<std::string>(SharedBackendParams::kHistoryFill))),
-      kMiniBatchSize(options.Get<int>(kMiniBatchSizeId)),
+      kMiniBatchSize(0),
       kMovesLeftMaxEffect(options.Get<float>(kMovesLeftMaxEffectId)),
       kMovesLeftThreshold(options.Get<float>(kMovesLeftThresholdId)),
       kMovesLeftSlope(options.Get<float>(kMovesLeftSlopeId)),

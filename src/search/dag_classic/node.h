@@ -610,6 +610,7 @@ class LowNode {
   void SetNNEval(const EvalResult* eval) {
     assert(weight_ == 0);
     assert(GetChild()->GetNStarted() == 0);
+    assert(num_parents_ & kQueuedForNNEval);
 
     Edge* edges = GetEdges();
 
@@ -624,7 +625,17 @@ class LowNode {
     m_ = eval->m;
     weight_ = eval->e;
 
+    // Eval has been done, we use cancel because implementation is the same.
+    CancelEval();
+
     assert(WLDMInvariantsHold());
+  }
+
+  void QueueForEval();
+  bool TryQueueForEval();
+  void CancelEval();
+  bool IsQueuedForEval() const {
+    return (num_parents_ & kQueuedForNNEval) != 0;
   }
 
   // Gets the first child.
@@ -949,6 +960,7 @@ class LowNode {
   };
 
  private:
+  static constexpr uint32_t kQueuedForNNEval = 0x8000'0000;
   // To minimize the number of padding bytes and to avoid having unnecessary
   // padding when new fields are added, we arrange the fields by size, largest
   // to smallest.

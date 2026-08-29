@@ -55,6 +55,7 @@ using InputPlanes = std::vector<InputPlane>;
 // An interface to implement by computing backends.
 class NetworkComputation {
  public:
+  static constexpr uint32_t npos = static_cast<uint32_t>(-1);
   // Adds a sample to the batch.
   virtual void AddInput(InputPlanes&& input) = 0;
   virtual uint32_t AddInputConcurrent(InputPlanes&&) {

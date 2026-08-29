@@ -139,7 +139,8 @@ class OnnxComputation final : public NetworkComputation {
   int GetBatchSize() const override;
   void ComputeBlocking() override;
   void ComputeBlockingImpl();
-  void CaptureCudaGraph(std::unique_lock<std::mutex>&& lock = std::unique_lock<std::mutex>());
+  void CaptureCudaGraph(
+      std::unique_lock<std::mutex>&& lock = std::unique_lock<std::mutex>());
   float GetQVal(int sample) const override;
   float GetDVal(int sample) const override;
   float GetEVal(int sample) const override;
@@ -182,8 +183,7 @@ class OnnxNetwork final : public Network {
     return capabilities_;
   }
   int GetMiniBatchSize() const override {
-    return batch_size_ == -1 ? Network::GetMiniBatchSize()
-                             : batch_size_ * steps_;
+    return opt_batch_size_;
   }
   int GetPreferredBatchStep() const override {
     return batch_size_ == -1 ? min_batch_size_ : batch_size_;
@@ -195,7 +195,8 @@ class OnnxNetwork final : public Network {
 #endif
   bool IsCpu() const override { return provider_ == OnnxProvider::CPU; }
 
-  Ort::SessionOptions GetOptions(int threads, int batch_size, uint64_t hash, int optimize);
+  Ort::SessionOptions GetOptions(int threads, int batch_size, uint64_t hash,
+                                 int optimize);
 
   std::unique_ptr<InputsOutputs> GetInputsOutputs() {
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
@@ -400,9 +401,9 @@ void OnnxComputation<DataType>::AddInput(InputPlanes&& input) {
 template <typename DataType>
 uint32_t OnnxComputation<DataType>::AddInputConcurrent(InputPlanes&& input) {
   auto input_size = input_size_.fetch_add(1, std::memory_order_relaxed);
-  if (input_size >= network_->max_batch_size_) {
-    throw Exception("NN input exceeds max batch size of " +
-                    std::to_string(network_->max_batch_size_) + ".");
+  if (static_cast<int>(input_size) >= network_->GetMiniBatchSize()) {
+    input_size_.fetch_sub(1, std::memory_order_relaxed);
+    return NetworkComputation::npos;
   }
 #ifdef USE_ONNX_CUDART
   if (network_->provider_ == OnnxProvider::CUDA ||
@@ -1075,7 +1076,7 @@ OnnxNetwork::OnnxNetwork(const WeightsFile& file, const OptionsDict& opts,
   steps_ = opts.GetOrDefault<int>("steps", default_steps);
   min_batch_size_ = opts.GetOrDefault<int>("min_batch", default_min_batch);
   opt_batch_size_ = opts.GetOrDefault<int>(
-      "optimize_batch", batch_size_ < 0 ? 256 : batch_size_ * steps_);
+      "opt_batch", batch_size_ < 0 ? 256 : batch_size_ * steps_);
 
   // Sanity checks.
   if (batch_size_ <= 0) {

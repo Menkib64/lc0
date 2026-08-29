@@ -136,6 +136,10 @@ class CudaNetworkComputation final : public NetworkComputation {
 
   uint32_t AddInputConcurrent(InputPlanes&& input) override {
     auto batch_size = batch_size_.fetch_add(1, std::memory_order_relaxed);
+    if (batch_size >= network_->GetMiniBatchSize()) {
+      batch_size_.fetch_sub(1, std::memory_order_relaxed);
+      return NetworkComputation::npos;
+    }
     const auto iter_mask =
         &inputs_outputs_->input_masks_mem_[batch_size * kInputPlanes];
     const auto iter_val =
@@ -674,7 +678,7 @@ class CudaNetwork : public Network {
       comp.AddInput(InputPlanes{(size_t)kNumInputPlanes});
       // Make sure cublas is initialized in this thread.
       comp.ComputeBlocking();
-      for (int i = 0; i < GetMiniBatchSize(); i++) {
+      for (int i = 1; i < GetMiniBatchSize(); i++) {
         comp.AddInput(InputPlanes{(size_t)kNumInputPlanes});
         auto lock = LockEval();
         comp.CaptureGraph(std::move(lock));

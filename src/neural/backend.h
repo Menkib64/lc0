@@ -95,6 +95,7 @@ class BackendComputation {
     FETCHED_IMMEDIATELY = 1,  // Was in cache, the result is already populated.
     FETCHED_DELAYED = 2,      // Was already queued for evaluation but results
                               // aren't available yet.
+    MINIBATCH_FULL = 3,       // The mini-batch is full, cannot add more.
   };
   virtual AddInputResult AddInput(
       const EvalPosition& pos,    // Input position.

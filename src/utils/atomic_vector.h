@@ -37,6 +37,7 @@ class AtomicVector {
   using Allocator = std::allocator<T>;
 
  public:
+  static constexpr size_t npos = static_cast<size_t>(-1);
   AtomicVector() = default;
   explicit AtomicVector(size_t capacity) : capacity_(capacity), size_(0) {
     data_ = Allocator().allocate(capacity);
@@ -71,7 +72,21 @@ class AtomicVector {
   template <typename... Args>
   size_t emplace_back(Args&&... args) {
     size_t i = size_.fetch_add(1, std::memory_order_relaxed);
-    assert(i < capacity_);
+    if (i >= capacity_) {
+      size_.fetch_sub(1, std::memory_order_relaxed);
+      return npos;
+    }
+    std::construct_at(&data_[i], std::forward<Args>(args)...);
+    return i;
+  }
+
+  template <typename... Args>
+  size_t EmplaceBackLimit(size_t limit, Args&&... args) {
+    size_t i = size_.fetch_add(1, std::memory_order_relaxed);
+    if (i >= limit) {
+      size_.fetch_sub(1, std::memory_order_relaxed);
+      return npos;
+    }
     std::construct_at(&data_[i], std::forward<Args>(args)...);
     return i;
   }

@@ -199,6 +199,27 @@ Node* LowNode::GetChildAt(uint16_t index) const {
   }
 }
 
+void LowNode::QueueForEval() {
+  assert((num_parents_ & kQueuedForNNEval) == 0);
+  num_parents_.fetch_or(kQueuedForNNEval, std::memory_order_release);
+}
+
+bool LowNode::TryQueueForEval() {
+  auto old = num_parents_.load(std::memory_order_acquire);
+  while ((old & kQueuedForNNEval) == 0) {
+    if (num_parents_.compare_exchange_weak(old, old | kQueuedForNNEval,
+                                           std::memory_order_acq_rel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void LowNode::CancelEval() {
+  assert((num_parents_ & kQueuedForNNEval) != 0);
+  num_parents_.fetch_and(~kQueuedForNNEval, std::memory_order_release);
+}
+
 std::string Node::DebugString() const {
   std::ostringstream oss;
   oss << " <Node> This:" << this << " LowNode:" << low_node_.get()

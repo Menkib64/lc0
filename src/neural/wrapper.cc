@@ -155,17 +155,25 @@ class NetworkAsBackendComputation : public BackendComputation {
                                      backend_->fill_empty_history_, &transform);
     size_t idx = 0;
     NetworkComputationRequest request{
-        .input = backend_->attrs_.concurrent_add_input ? InputPlanes{} : std::move(input),
+        .input = backend_->attrs_.concurrent_add_input ? InputPlanes{}
+                                                       : std::move(input),
         .nn_indices =
             NetworkComputationRequest::ToNNIndices(pos.legal_moves, transform),
         .result = result,
         .transform = transform};
     if (backend_->attrs_.concurrent_add_input) {
       idx = computation_->AddInputConcurrent(std::move(input));
+      if (idx == NetworkComputation::npos) {
+        return MINIBATCH_FULL;
+      }
       entries_.ResizeAtLeast(idx + 1);
       std::construct_at(&entries_[idx], std::move(request));
     } else {
-      entries_.emplace_back(std::move(request));
+      if (decltype(entries_)::npos ==
+          entries_.EmplaceBackLimit(backend_->attrs_.recommended_batch_size,
+                                    std::move(request))) {
+        return MINIBATCH_FULL;
+      }
     }
     return ENQUEUED_FOR_EVAL;
   }
