@@ -128,7 +128,7 @@ static size_t getMaxAttentionBodySize(const MultiHeadWeights& weights, int N) {
 }
 
 template <typename DataType>
-class CudaNetworkComputation : public NetworkComputation {
+class CudaNetworkComputation final : public NetworkComputation {
  public:
   CudaNetworkComputation(CudaNetwork<DataType>* network, bool wdl, bool wdl_err,
                          bool moves_left);
