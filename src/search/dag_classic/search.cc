@@ -1332,7 +1332,6 @@ static bool operator<(const EdgeAndNode&, const EdgeAndNode&) { return false; }
 
 std::vector<std::string> Search::GetVerboseStats(
     const Node* node, std::optional<Move> move_to_node) const {
-  LCTRACE_FUNCTION_SCOPE;
   const bool is_root = (node == root_node_);
   const bool is_odd_depth = !is_root;
   const bool is_black_to_move = (played_history_.IsBlackToMove() == is_root);
@@ -1458,7 +1457,6 @@ std::vector<std::string> Search::GetVerboseStats(
 }
 
 void Search::SendMovesStats() const REQUIRES(counters_mutex_) {
-  LCTRACE_FUNCTION_SCOPE;
   auto move_stats = GetVerboseStats(root_node_, std::nullopt);
 
   if (params_.GetVerboseStats()) {
@@ -1489,7 +1487,6 @@ void Search::SendMovesStats() const REQUIRES(counters_mutex_) {
 
 void Search::MaybeTriggerStop(const classic::IterationStats& stats,
                               classic::StoppersHints* hints) {
-  LCTRACE_FUNCTION_SCOPE;
   hints->Reset();
   if (params_.GetNpsLimit() > 0) {
     hints->UpdateEstimatedNps(params_.GetNpsLimit());
@@ -1840,7 +1837,6 @@ bool Search::IsSearchActive() const {
 }
 
 void Search::PopulateCommonIterationStats(classic::IterationStats* stats) {
-  LCTRACE_FUNCTION_SCOPE;
   stats->time_since_movestart = GetTimeSinceStart();
 
   SharedMutex::SharedLock nodes_lock(nodes_mutex_);
