@@ -1976,6 +1976,7 @@ void Search::Wait() {
     SharedMutex::Lock lock(nodes_mutex_);
 
     assert(root_node_->ZeroNInFlight());
+    assert(root_node_->ZeroQueuedForEval());
   }
   LOGFILE << "Search threads cleaned.";
 }

@@ -913,6 +913,27 @@ bool Node::ZeroNInFlight() const {
 
   return true;
 }
+
+bool Node::ZeroQueuedForEval() const {
+  size_t nonzero_node_count = 0;
+  TreeWalk(
+      this, false,
+      [&](const LowNode* low, bool) {
+        if (low->IsQueuedForEval()) {
+          CERR << low->DebugString() << std::endl;
+          ++nonzero_node_count;
+        }
+      },
+      [](const Node*, bool, const LowNode*) {});
+
+  if (nonzero_node_count > 0) {
+    CERR << "IsQueuedForEval() is true on " << nonzero_node_count << " nodes"
+         << std::endl;
+    return false;
+  }
+
+  return true;
+}
 #endif
 
 void Node::SortEdges() const {

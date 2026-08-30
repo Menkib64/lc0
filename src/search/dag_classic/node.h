@@ -485,6 +485,8 @@ class Node {
   // Returns true if graph under this node has every n_in_flight_ == 0 and
   // prints offending nodes and low nodes and stats to cerr otherwise.
   bool ZeroNInFlight() const;
+  // Check child graphs for any node which is queued for eval.
+  bool ZeroQueuedForEval() const;
 
   void SortEdges() const;
 
@@ -631,9 +633,14 @@ class LowNode {
     assert(WLDMInvariantsHold());
   }
 
+  // Mark low node to be queued for eval when no other thread can access it.
   void QueueForEval();
+  // Try to mark low node to be queued for an eval when other threads may be
+  // accessing it.
   bool TryQueueForEval();
+  // Cancel the queued eval if queue attempt failed.
   void CancelEval();
+  // Debug assert helper to check if this low node is queued for eval.
   bool IsQueuedForEval() const {
     return (num_parents_ & kQueuedForNNEval) != 0;
   }
