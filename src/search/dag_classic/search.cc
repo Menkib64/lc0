@@ -2298,6 +2298,7 @@ int CalculateCollisionsLeft(int64_t nodes, const SearchParams& params) {
 }
 
 // Task to schedule backup propagation to multiple threads.
+template <bool can_be_multivisit>
 class BackupTask final : public TaskQueue::PickTask {
  public:
   BackupTask(SearchWorker& worker,
@@ -2333,7 +2334,8 @@ class BackupTask final : public TaskQueue::PickTask {
         worker_.FetchSingleNodeResult(&node_to_process, path);
       }
 
-      result += worker_.DoBackupUpdateSingleNode(node_to_process, path);
+      result += worker_.DoBackupUpdateSingleNode<can_be_multivisit>(
+          node_to_process, path);
     }
     result_ = result;
   }
@@ -2350,15 +2352,17 @@ class BackupTask final : public TaskQueue::PickTask {
   std::atomic<int> done_{0};
 };
 
-TaskArray<BackupTask> ScheduleBackupUpdateTasks(
+template <bool can_be_multivisit>
+TaskArray<BackupTask<can_be_multivisit>> ScheduleBackupUpdateTasks(
     SearchWorker& worker, size_t workers,
     const AtomicVector<SearchWorker::NodeToProcess>& batch) {
+  using TaskType = BackupTask<can_be_multivisit>;
   if (batch.empty()) return {0};
 
   const size_t tail_share = 4;
   size_t positions = batch.size();
   bool use_small_tail = positions >= tail_share * workers && workers > 1;
-  TaskArray<BackupTask> tasks(workers * (use_small_tail ? 2 : 1));
+  TaskArray<TaskType> tasks(workers * (use_small_tail ? 2 : 1));
   size_t first_positions =
       use_small_tail ? positions * (tail_share - 1) / tail_share : positions;
   size_t positions_per_task = first_positions / workers;
@@ -2596,7 +2600,8 @@ void SearchWorker::GatherMinibatch() {
           state_.ooobatch_.size() < search_->state_.task_queue_.Size() * 4
               ? std::max<size_t>(1, search_->state_.task_queue_.Size())
               : search_->state_.task_queue_.Size() + 1;
-      auto tasks = ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
+      auto tasks =
+          ScheduleBackupUpdateTasks<true>(*this, threads, state_.ooobatch_);
       ScheduleCancelTask(collisions_start, collisions_end, false);
       number_out_of_order_ += state_.ooobatch_.size();
       for (auto& task : tasks) {
@@ -2801,14 +2806,13 @@ SearchWorker::PickNodesToExtendTask(int collision_limit, int tid,
     // a collision of appropriate size and pop current_path.
     if (current_path.back().stop_picking_) {
       if (current_path.back().visit_child_) {
-        // Don't try to visit a node if low node is pending NN evaluation and
-        // visit attempt has already failed.
-        if (!node->GetLowNode() || node->GetLowNode()->GetWeight() != 0) {
-          Visit(full_path, history);
-          cur_limit -= 1;
-        } else {
+        unsigned visits = Visit(full_path, history, cur_limit);
+        if (visits == 0) {
           node->CancelScoreUpdate(1);
+        } else if (visits > 1) {
+          node->IncrementNInFlight(visits - 1);
         }
+        cur_limit -= visits;
       }
       // Visits are created elsewhere, just need the collisions here.
       if (cur_limit > 0) {
@@ -3217,13 +3221,19 @@ int SearchWorker::Collision(const BackupPath& path, int collision_count,
 }
 
 // Create a node visit to process.
-void SearchWorker::Visit(const BackupPath& path,
-                         const PositionHistory& history) {
+unsigned SearchWorker::Visit(const BackupPath& path,
+                             const PositionHistory& history, unsigned visits) {
   NodeToProcess picked_node(history);
   if (picked_node.IsExtendable(path)) {
     ExtendNode(picked_node, path, history);
   } else {
     picked_node.is_edge_update = true;
+    // Terminals including repetitions get extra visits.
+    auto [node, repetitions, distance] = path.back();
+    if (node->IsTerminal() || repetitions > 0) {
+      // TODO: Should this be scaled down in some cases?
+      picked_node.visits = visits;
+    }
   }
   if (params_.GetOutOfOrderEval() && picked_node.CanEvalOutOfOrder(path)) {
     int i = state_.ooobatch_.emplace_back(std::move(picked_node));
@@ -3232,6 +3242,7 @@ void SearchWorker::Visit(const BackupPath& path,
     int i = state_.minibatch_.emplace_back(std::move(picked_node));
     AssignMinibatchPath(i, path);
   }
+  return picked_node.visits;
 }
 
 void SearchWorker::ExtendNode(NodeToProcess& picked_node,
@@ -3466,7 +3477,7 @@ bool SearchWorker::DoBackupUpdate() {
   // Nodes mutex for doing node updates.
   SharedMutex::Lock lock(search_->nodes_mutex_);
   bool work_done = number_out_of_order_ > 0 || !state_.minibatch_.empty();
-  auto tasks = ScheduleBackupUpdateTasks(
+  auto tasks = ScheduleBackupUpdateTasks<false>(
       *this, search_->state_.task_queue_.Size() + 1, state_.minibatch_);
   auto& tc = search_->thread_count_;
   int count = tc.load(std::memory_order_relaxed);
@@ -3564,9 +3575,11 @@ bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
 // parent low node and so on until the root is reached. Low node may become a
 // transposition and/or get more information even during this batch. Both low
 // node and node may adjust bounds and become a terminal during this batch.
+// Requires search_->nodes_mutex_ to be locked by search thread but task threads
+// won't take so static analysis doesn't understand it.
+template <bool can_be_multivisit>
 SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
-    const NodeToProcess& node_to_process, const BackupPath& path)
-    REQUIRES(search_->nodes_mutex_) {
+    const NodeToProcess& node_to_process, const BackupPath& path) {
   auto [n, nr, nm] = path.back();
 
   const auto& nl = n->GetLowNode();
@@ -3591,10 +3604,14 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   double v_delta = 0.0;
   double d_delta = 0.0;
   float m_delta = 0.0f;
+  assert(can_be_multivisit || node_to_process.visits == 1);
+  const unsigned visits = can_be_multivisit ? node_to_process.visits : 1;
 
   double avg_weight = params_.GetUseUncertaintyWeighting()
                           ? params_.GetUncertaintyWeightingCap()
                           : 1.0;
+
+  avg_weight *= visits;
 
   // Update the low node at the start of the backup path first, but only visit
   // it the first time that backup sees it.
@@ -3608,7 +3625,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       outer_low_lock.unlock();
       node_lock.unlock();
       for (auto it = path.crbegin(); it != path.crend(); ++it) {
-        std::get<0>(*it)->CancelScoreUpdate(1);
+        std::get<0>(*it)->CancelScoreUpdate(visits);
       }
       return {};
     }
@@ -3659,7 +3676,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   // Backup V value up to a root. After 1 visit, V = Q.
   for (auto it = path.crbegin(); it != path.crend();
        /* ++it in the body */) {
-    auto divisor = n->FinalizeScoreUpdate(v, d, m, avg_weight);
+    auto divisor = n->FinalizeScoreUpdate(v, d, m, avg_weight, visits);
     if (weight_to_fix > 0 && !n->IsTerminal()) {
       n->AdjustForTerminal(v_delta, d_delta, m_delta, divisor, weight_to_fix);
     }
@@ -3714,9 +3731,10 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   node_lock.unlock();
 
   BackupUpdateResults rv{};
-  rv.total_playouts_ = 1;
+  rv.total_playouts_ = visits;
   if (node_to_process.nn_queried && !node_to_process.is_cache_hit &&
       !node_to_process.is_delayed_cache_hit) {
+    assert(visits == 1);
     rv.network_evaluations_ = 1;
   }
   rv.cum_depth_ = path.size();

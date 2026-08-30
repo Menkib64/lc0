@@ -433,7 +433,8 @@ class Node {
   // * Q (weighted average of all V in a subtree)
   // * W (+=multiweight)
   // * N-in-flight (-=1)
-  double FinalizeScoreUpdate(double v, double d, float m, double multiweight);
+  double FinalizeScoreUpdate(double v, double d, float m, double multiweight,
+                             unsigned visits);
   // Like FinalizeScoreUpdate, but it updates n existing visits by delta amount.
   void AdjustForTerminal(double v, double d, float m, double divisor,
                          double multiweight);
