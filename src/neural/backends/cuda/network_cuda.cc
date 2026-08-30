@@ -261,7 +261,14 @@ class CudaNetwork : public Network {
     showDeviceInfo(deviceProp, gpu_id_);
 
     l2_cache_size_ = deviceProp.l2CacheSize;
-    sm_count_ = deviceProp.multiProcessorCount;
+
+    opt_batch_size_ =
+        options.GetOrDefault<int>("opt_batch", deviceProp.multiProcessorCount);
+
+    if (opt_batch_size_ < min_batch_size_ ||
+        opt_batch_size_ > max_batch_size_) {
+      throw Exception("opt_batch must be between min_batch and max_batch");
+    }
 
     allow_cache_opt_ = options.GetOrDefault<bool>("cache_opt", false);
 
@@ -1093,13 +1100,13 @@ class CudaNetwork : public Network {
 
   int GetMiniBatchSize() const override {
     // Simple heuristic that seems to work for a wide range of GPUs.
-    return 2 * sm_count_;
+    return opt_batch_size_;
   }
 
   int GetPreferredBatchStep() const override {
     if (preferred_batch_size_ > 0) return preferred_batch_size_;
-    int preferred_split = 7;
-    while (sm_count_ % preferred_split != 0) preferred_split++;
+    int preferred_split = std::min(7, opt_batch_size_);
+    while (opt_batch_size_ % preferred_split != 0) preferred_split++;
     return preferred_split;
   }
 
@@ -1150,9 +1157,9 @@ class CudaNetwork : public Network {
   const NetworkCapabilities capabilities_;
   int gpu_id_;
   int l2_cache_size_;
-  int sm_count_;
   int max_batch_size_;
   int min_batch_size_;
+  int opt_batch_size_;
   int preferred_batch_size_;
   bool enable_graph_capture_;
   bool wdl_;
