@@ -629,6 +629,7 @@ class SearchWorker {
     bool is_delayed_cache_hit : 1 = false;
     bool is_delayed_tt_hit : 1 = false;
     bool is_edge_update : 1 = false;
+    unsigned visits : 20 = 1;
 
     std::string DebugString(const BackupPath& path) const {
       auto node = std::get<0>(path.back());
@@ -663,6 +664,8 @@ class SearchWorker {
         : is_black_to_move(history.IsBlackToMove()) {}
   };
 
+  static_assert(sizeof(NodeToProcess) <= 2 * sizeof(uint32_t));
+
  private:
   NodeToProcess PickNodeToExtend(int collision_limit);
   // Adjust parameters for updating node @n and its parent low node if node is
@@ -689,6 +692,7 @@ class SearchWorker {
       return *this;
     }
   };
+  template <bool can_be_multi_visit = false>
   BackupUpdateResults DoBackupUpdateSingleNode(
       const NodeToProcess& node_to_process, const BackupPath& path);
   bool IsMinibatch(const AtomicVector<NodeToProcess>& batch) const;
@@ -704,7 +708,8 @@ class SearchWorker {
 
   // Add visits or collisions to nodes
   int Collision(const BackupPath& path, int collision_count, int maxvisits);
-  bool Visit(const BackupPath& path, const PositionHistory& history);
+  unsigned Visit(const BackupPath& path, const PositionHistory& history,
+                 unsigned visits);
 
   // Check if there is a reason to stop picking and pick @node.
   bool ShouldStopPickingHere(Node* node, bool is_root_node, int repetitions);

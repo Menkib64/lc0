@@ -418,7 +418,7 @@ void LowNode::AdjustForTerminal(double v, double d, float m, double divisor,
 }
 
 double Node::FinalizeScoreUpdate(double v, double d, float m,
-                                 double multiweight) {
+                                 double multiweight, unsigned visits) {
   // Increment N.
   weight_ += multiweight;
 
@@ -431,7 +431,7 @@ double Node::FinalizeScoreUpdate(double v, double d, float m,
   assert(WLDMInvariantsHold());
   // Decrement virtual loss.
   [[maybe_unused]]
-  auto old = n_in_flight_.fetch_sub(1, std::memory_order_acq_rel);
+  auto old = n_in_flight_.fetch_sub(visits, std::memory_order_acq_rel);
   assert(old > 0);
   return divisor;
 }
