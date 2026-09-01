@@ -745,12 +745,6 @@ void Numa::ReserveSearchWorkers([[maybe_unused]] size_t num_workers) {
     return;
   }
   config->ReserveCoresOnNode(node_id, num_workers);
-
-  CpuSet cpuset;
-  cpuset |= config->initial_affinity_;
-  cpuset &= ~config->reserved_set_;
-
-  config->SetAffintyAll(!cpuset ? config->initial_affinity_ : cpuset);
 #endif
 }
 
