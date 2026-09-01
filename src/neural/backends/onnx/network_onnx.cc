@@ -182,8 +182,7 @@ class OnnxNetwork final : public Network {
     return capabilities_;
   }
   int GetMiniBatchSize() const override {
-    return batch_size_ == -1 ? Network::GetMiniBatchSize()
-                             : batch_size_ * steps_;
+    return opt_batch_size_;
   }
   int GetPreferredBatchStep() const override {
     return batch_size_ == -1 ? min_batch_size_ : batch_size_;
@@ -1075,7 +1074,7 @@ OnnxNetwork::OnnxNetwork(const WeightsFile& file, const OptionsDict& opts,
   steps_ = opts.GetOrDefault<int>("steps", default_steps);
   min_batch_size_ = opts.GetOrDefault<int>("min_batch", default_min_batch);
   opt_batch_size_ = opts.GetOrDefault<int>(
-      "optimize_batch", batch_size_ < 0 ? 256 : batch_size_ * steps_);
+      "opt_batch", batch_size_ < 0 ? 256 : batch_size_ * steps_);
 
   // Sanity checks.
   if (batch_size_ <= 0) {
