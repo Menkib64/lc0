@@ -697,16 +697,17 @@ void DemuxingChildBackend::Worker() {
 void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
   LCTRACE_FUNCTION_SCOPE;
   assert(UsedBatchSize() != 0);
+  size_t used_batch_size = UsedBatchSize();
   callback_ = callback;
   // Calculate batch_step_ size split count.
   int step = backend_->attrs_.preferred_batch_step;
-  if (UsedBatchSize() <
+  if (used_batch_size <
           backend_->minimum_batch_step_ * backend_->backends_.size() &&
-      UsedBatchSize() > backend_->lower_limit_batch_step_) {
+      used_batch_size > backend_->lower_limit_batch_step_) {
     step = backend_->minimum_batch_step_;
   }
-  int splits = 1 + (UsedBatchSize() - 1) / step;
-  int last_split_size = (UsedBatchSize() - 1) % step + 1;
+  int splits = 1 + (used_batch_size - 1) / step;
+  int last_split_size = (used_batch_size - 1) % step + 1;
   bool are_all_splits_full = last_split_size == step;
   // Calculate the minimum number of splits per backend.
   int split_size_per_backend = splits / backend_->backends_.size();
