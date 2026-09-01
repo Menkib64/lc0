@@ -477,6 +477,8 @@ class DemuxingBackend final : public Backend {
     lower_limit_batch_step_ = backend_options.GetOrDefault<int>(
         "lower_limit_min_batch_step", default_min_batch_step);
 
+    CalibratePerformance();
+
     CERR << "Demuxing backend initialized with " << backends_.size()
          << " backends, maximum batch size: " << attrs_.maximum_batch_size
          << ", recommended batch size: " << attrs_.recommended_batch_size
@@ -619,6 +621,16 @@ void DemuxingComputation::ProcessResults(const DemuxingWork& work) {
 
 std::unique_ptr<BackendComputation> DemuxingBackend::CreateComputation() {
   return std::make_unique<DemuxingComputation>(this);
+}
+
+void DemuxingBackend::CalibratePerformance() {
+  Position board{ChessBoard::kStartposBoard, 0, 0};
+  EvalPosition pos{.pos = std::span(&board, 1), .legal_moves = {}};
+  DemuxingComputation computation(this);
+  for (int i = 0; i < attrs_.recommended_batch_size; i++) {
+    computation.AddInput(pos, {});
+  }
+  computation.ComputeBlocking([](ComputationEvent) {});
 }
 
 DemuxingChildBackend::~DemuxingChildBackend() {
