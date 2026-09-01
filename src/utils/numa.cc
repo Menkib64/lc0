@@ -525,9 +525,12 @@ struct Config {
   }
 
   void ReserveCores(hwloc_obj_t parent, size_t count) {
-    ObjectRange cores{topology_, parent, HWLOC_OBJ_CORE};
     std::vector<hwloc_obj_t> core_objs;
-    std::copy(cores.begin(), cores.end(), std::back_inserter(core_objs));
+    hwloc_obj_t core = nullptr;
+    while ((core = hwloc_get_next_obj_inside_cpuset_by_type(
+                topology_, parent->cpuset, HWLOC_OBJ_CORE, core))) {
+      core_objs.push_back(core);
+    }
     // Use random shuffle to avoid using same cores for all SearchWorkers when
     // multiple lc0 process are runnig at the same time.
     if (shuffle_reservations_) {
