@@ -27,7 +27,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
 #include <cstdlib>
 #include <future>
 #include <new>
@@ -37,6 +36,7 @@
 #include "neural/encoder.h"
 #include "neural/factory.h"
 #include "neural/shared_params.h"
+#include "utils/atomic.h"
 #include "utils/atomic_vector.h"
 #include "utils/mutex.h"
 #include "utils/numa.h"
@@ -90,12 +90,12 @@ class DemuxingChildBackend {
 
   AssignFuture Assign(const std::string& name,
                       const std::optional<WeightsFile>& weights,
-                      const OptionsDict& opts, std::atomic<bool>& abort,
+                      const OptionsDict& opts,
                       size_t shared_count, size_t shared_stride) {
     AssignPromise promise;
     auto rv = promise.get_future();
     threads_.emplace_back([this, name, &weights, opts,
-                           promise = std::move(promise), &abort, shared_count,
+                           promise = std::move(promise), shared_count,
                            shared_stride]() mutable {
       try {
         int numa_node = opts.GetOrDefault<int>("numa_node", -1);
@@ -115,7 +115,7 @@ class DemuxingChildBackend {
           other_backends.reserve(shared_count - 1);
           for (size_t i = 1; i < shared_count; i++) {
             other_backends.emplace_back(this[shared_stride * i].Assign(
-                name, weights, opts, abort, 0, shared_stride * i));
+                name, weights, opts, 0, shared_stride * i));
           }
         }
         int nn_threads = opts.GetOrDefault<int>("demux_threads", 0);
@@ -126,16 +126,15 @@ class DemuxingChildBackend {
           SpinloopPause();
         }
         for (int i = 1; i < nn_threads; i++) {
-          threads_.emplace_back(
-              [&abort, this, numa_node, numa_cuda_gpu, gpu]() {
-                if (numa_node >= 0) {
-                  Numa::BindThreadToNode(numa_node);
-                }
-                if (numa_cuda_gpu) {
-                  Numa::BindThreadToCudaDevice(gpu);
-                }
-                Worker(abort);
-              });
+          threads_.emplace_back([this, numa_node, numa_cuda_gpu, gpu]() {
+            if (numa_node >= 0) {
+              Numa::BindThreadToNode(numa_node);
+            }
+            if (numa_cuda_gpu) {
+              Numa::BindThreadToCudaDevice(gpu);
+            }
+            Worker();
+          });
         }
         for (auto& f : other_backends) {
           // Wait for the other shared backends and check for exceptions.
@@ -146,7 +145,7 @@ class DemuxingChildBackend {
         promise.set_exception(std::current_exception());
         return;
       }
-      Worker(abort);
+      Worker();
     });
     thread_init_ordering_.store(1, std::memory_order_release);
     return rv;
@@ -299,22 +298,29 @@ class DemuxingChildBackend {
   }
 
   void Enqueue(DemuxingWork* work) {
+    bool signal_atomic = false;
     {
       Mutex::Lock lock(mutex_);
       work->predicted_times_ = AddBackendWork(work->end_ - work->start_);
       queue_.push(work);
+      State s = worker_state_.load(std::memory_order_relaxed);
+      if (s == SLEEP) {
+        signal_atomic = true;
+        worker_state_.store(DATAQUEUED, std::memory_order_relaxed);
+      }
     }
-    dataready_cv_.notify_one();
+    if (signal_atomic) {
+      worker_state_.notify_one();
+    }
   }
 
   void Abort() {
-    {
-      Mutex::Lock lock(mutex_);
-    }
-    dataready_cv_.notify_all();
+    Mutex::Lock lock(mutex_);
+    worker_state_.store(ABORTED, std::memory_order_relaxed);
+    worker_state_.notify_all();
   }
 
-  void Worker(std::atomic<bool>& abort);
+  void Worker();
 
  private:
   struct IdlePrediction {
@@ -331,7 +337,8 @@ class DemuxingChildBackend {
   alignas(kCacheLineSize) std::atomic<IdlePrediction> idle_prediction_;
   // Mutex protected queue
   Mutex mutex_;
-  std::condition_variable dataready_cv_;
+  enum State { SLEEP, DATAQUEUED, ABORTED };
+  WaitableAtomic<State> worker_state_{SLEEP};
   std::queue<DemuxingWork*> queue_ GUARDED_BY(mutex_);
 };
 
@@ -418,7 +425,7 @@ class DemuxingBackend final : public Backend {
       int shared_threads) {
     const std::string backend = opts.GetOrDefault<std::string>("backend", name);
 
-    return backends_[index].Assign(backend, weights, opts, abort_,
+    return backends_[index].Assign(backend, weights, opts,
                                    shared_threads,
                                    backends_.size() / shared_threads);
   }
@@ -430,7 +437,6 @@ class DemuxingBackend final : public Backend {
   ~DemuxingBackend() { Abort(); }
 
   void Abort() {
-    abort_.store(true, std::memory_order_relaxed);
     for (auto& b : backends_) {
       b.Abort();
     }
@@ -466,7 +472,6 @@ class DemuxingBackend final : public Backend {
   bool uses_cpu_backend_ = false;
 
   alignas(kCacheLineSize) Mutex load_balancing_mutex_;
-  alignas(kCacheLineSize) std::atomic<bool> abort_ = false;
 
   // Cache cold variables
   const std::string backend_opts_;
@@ -561,43 +566,53 @@ DemuxingChildBackend::~DemuxingChildBackend() {
   }
 }
 
-void DemuxingChildBackend::Worker(std::atomic<bool>& abort) {
-  while (!abort.load(std::memory_order_relaxed)) {
+void DemuxingChildBackend::Worker() {
+  while (worker_state_.load(std::memory_order_relaxed) != ABORTED) {
     DemuxingWork* work = nullptr;
     {
+      worker_state_.wait(SLEEP, std::memory_order_relaxed);
       Mutex::Lock lock(mutex_);
-      dataready_cv_.wait(lock.get_raw(), [&] {
-        return abort.load(std::memory_order_relaxed) || !queue_.empty();
-      });
-      if (abort.load(std::memory_order_relaxed)) return;
-      if (!queue_.empty()) {
-        work = queue_.front();
-        queue_.pop();
+      State s = worker_state_.load(std::memory_order_relaxed);
+      if (queue_.empty()) {
+        if (s == DATAQUEUED) {
+          worker_state_.store(SLEEP, std::memory_order_relaxed);
+        }
+        continue;
+      }
+      work = queue_.front();
+      queue_.pop();
+      if (queue_.empty()) {
+        if (s == DATAQUEUED) {
+          worker_state_.store(SLEEP, std::memory_order_relaxed);
+        }
+      } else {
+        if (threads_.size() > 1) {
+          worker_state_.notify_one();
+        }
       }
     }
-    if (work) {
-      LCTRACE_FUNCTION_SCOPE;
-      work->computation_ = network_->NewComputation();
-      auto& entries = work->source_->entries_;
-      for (int i = work->start_; i < work->end_; i++) {
-        work->computation_->AddInput(std::move(entries[i].input));
-      }
-      if (work->predicted_times_.queue_was_idle_) {
-        StartComputationWhenIdle();
-      }
-      work->computation_->ComputeBlocking();
-      // TODO: This should read the time from the backend which could use more
-      // accurate GPU timers. CPU time has potential for random extra delay
-      // sometimes.
-      CompleteBackendWork(work->end_ - work->start_, work->predicted_times_);
-      int expected = 0;
-      if (work->source_->first_done_.compare_exchange_strong(
-              expected, 1, std::memory_order_relaxed)) {
-        work->source_->NotifyFirstDone();
-      }
-      work->ProcessResults();
-      work->source_->NotifyComplete();
+    assert(work);
+    LCTRACE_FUNCTION_SCOPE;
+    work->computation_ = network_->NewComputation();
+    auto& entries = work->source_->entries_;
+    for (int i = work->start_; i < work->end_; i++) {
+      work->computation_->AddInput(std::move(entries[i].input));
     }
+    if (work->predicted_times_.queue_was_idle_) {
+      StartComputationWhenIdle();
+    }
+    work->computation_->ComputeBlocking();
+    // TODO: This should read the time from the backend which could use more
+    // accurate GPU timers. CPU time has potential for random extra delay
+    // sometimes.
+    CompleteBackendWork(work->end_ - work->start_, work->predicted_times_);
+    int expected = 0;
+    if (work->source_->first_done_.compare_exchange_strong(
+            expected, 1, std::memory_order_relaxed)) {
+      work->source_->NotifyFirstDone();
+    }
+    work->ProcessResults();
+    work->source_->NotifyComplete();
   }
 }
 
