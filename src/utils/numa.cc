@@ -588,7 +588,7 @@ struct Config {
   }
 
   bool CheckReservedCores(size_t node_id, size_t num_workers) {
-    if (use_search_shared_core_) {
+    if (!use_search_shared_core_) {
       if (reserved_cores_.size() != num_workers) return false;
     } else {
       size_t threads = std::accumulate(
