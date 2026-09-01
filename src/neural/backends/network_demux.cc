@@ -90,13 +90,14 @@ class DemuxingChildBackend {
 
   AssignFuture Assign(const std::string& name,
                       const std::optional<WeightsFile>& weights,
-                      const OptionsDict& opts,
-                      size_t shared_count, size_t shared_stride) {
+                      const OptionsDict& opts, std::span<int> shared_threads,
+                      int shared_index = 0) {
     AssignPromise promise;
     auto rv = promise.get_future();
+    assert(shared_index == 0 || shared_threads.empty());
     threads_.emplace_back([this, name, &weights, opts,
-                           promise = std::move(promise), shared_count,
-                           shared_stride]() mutable {
+                           promise = std::move(promise), shared_threads,
+                           shared_index]() mutable {
       try {
         int numa_node = opts.GetOrDefault<int>("numa_node", -1);
         bool numa_cuda_gpu = opts.GetOrDefault<bool>("numa_cuda_gpu", false);
@@ -107,15 +108,18 @@ class DemuxingChildBackend {
         if (numa_cuda_gpu) {
           Numa::BindThreadToCudaDevice(gpu);
         }
-        AssingType result =
-            shared_count > 0 ? ConstructBackend(name, weights, opts)
-                             : UseSharedBackend(this[-shared_stride].network_);
+        AssingType result = shared_index == 0
+                                ? ConstructBackend(name, weights, opts)
+                                : UseSharedBackend(this[shared_index].network_);
         std::vector<AssignFuture> other_backends;
-        if (shared_count > 1) {
-          other_backends.reserve(shared_count - 1);
-          for (size_t i = 1; i < shared_count; i++) {
-            other_backends.emplace_back(this[shared_stride * i].Assign(
-                name, weights, opts, 0, shared_stride * i));
+        if (shared_threads.size() > 1) {
+          std::get<0>(result).recommended_batch_size *= shared_threads.size();
+          other_backends.reserve(shared_threads.size() - 1);
+          int my_index = shared_threads.front();
+          for (int i = 1; i < (int)shared_threads.size(); i++) {
+            int index = shared_threads[i];
+            other_backends.emplace_back(this[index - my_index].Assign(
+                name, weights, opts, std::span<int>(), my_index - index));
           }
         }
         int nn_threads = opts.GetOrDefault<int>("demux_threads", 0);
@@ -344,18 +348,30 @@ class DemuxingChildBackend {
 
 class DemuxingBackend final : public Backend {
  public:
+  static size_t CalculateBackendCount(const OptionsDict& backend_options) {
+    const auto parents = backend_options.ListSubdicts();
+    if (parents.empty()) {
+      return std::max(
+          1, backend_options.GetOrDefault<int>("shared_backend_threads", 1));
+    }
+    size_t count = 0;
+    for (const auto& name : parents) {
+      const auto& opts = backend_options.GetSubdict(name);
+      size_t shared = opts.GetOrDefault<int>("shared_backend_threads", 1);
+      count += std::max<size_t>(1, shared);
+    }
+    return count;
+  }
   DemuxingBackend(const std::optional<WeightsFile>& weights,
                   const OptionsDict& options,
                   const OptionsDict& backend_options)
-      : backends_(std::max(size_t(1), backend_options.ListSubdicts().size() *
-                                          backend_options.GetOrDefault<int>(
-                                              "shared_backend_threads", 1))),
+      : backends_(CalculateBackendCount(backend_options)),
         backend_opts_(
             options.Get<std::string>(SharedBackendParams::kBackendOptionsId)),
         weights_path_(
             options.Get<std::string>(SharedBackendParams::kWeightsId)) {
-    int shared_threads =
-        backend_options.GetOrDefault<int>("shared_backend_threads", 1);
+    int shared_threads = std::max(
+        1, backend_options.GetOrDefault<int>("shared_backend_threads", 1));
     minimum_batch_step_ =
         backend_options.GetOrDefault<int>("min_batch_step", 1);
     UpdateConfiguration(options);
@@ -366,15 +382,65 @@ class DemuxingBackend final : public Backend {
       // If options are empty, or multiplexer configured in root object,
       // initialize on root object and default backend.
       auto backends = NetworkFactory::Get()->GetBackendsList();
-      capabilities.emplace_back(
-          AddBackend(0, backends[0], weights, backend_options, shared_threads));
+      std::vector<int> indexes;
+      indexes.resize(shared_threads);
+      assert(indexes.size() == backends_.size());
+      std::generate(indexes.begin(), indexes.end(),
+                    [n = 0]() mutable { return n++; });
+      capabilities.emplace_back(AddBackend(
+          0, backends[0], weights, backend_options, std::span(indexes)));
     }
+
+    std::vector<std::tuple<unsigned, unsigned, std::vector<int>>>
+        shared_indexes;
+    // Interleave indexes if using shared backends.
+    if (backends_.size() != parents.size()) {
+      shared_indexes.reserve(parents.size());
+      unsigned i = 0;
+      for (const auto& name : parents) {
+        const auto& opts = backend_options.GetSubdict(name);
+        unsigned shared_threads =
+            std::max(1, opts.GetOrDefault<int>("shared_backend_threads", 1));
+        shared_indexes.emplace_back(shared_threads, i++, std::vector<int>());
+      }
+      std::sort(shared_indexes.begin(), shared_indexes.end(),
+                [](const auto& a, const auto& b) {
+                  return std::get<0>(a) > std::get<0>(b);
+                });
+      auto iter = shared_indexes.begin();
+      unsigned src = 0;
+      for (i = 0; i < backends_.size(); i++, iter++) {
+        if (iter == shared_indexes.end()) {
+          iter = shared_indexes.begin();
+          src++;
+        }
+        while (std::get<0>(*iter) <= src) {
+          iter++;
+          if (iter == shared_indexes.end()) {
+            iter = shared_indexes.begin();
+            src++;
+          }
+        }
+        std::get<2>(*iter).push_back(i);
+      }
+    }
+    std::sort(shared_indexes.begin(), shared_indexes.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<1>(a) < std::get<1>(b);
+              });
 
     int i = 0;
     for (const auto& name : parents) {
-      capabilities.emplace_back(AddBackend(i++, name, weights,
+      int index = i;
+      std::span<int> shared_threads;
+      if (!shared_indexes.empty()) {
+        index = std::get<2>(shared_indexes[i]).front();
+        shared_threads = std::span(std::get<2>(shared_indexes[i]));
+      }
+      capabilities.emplace_back(AddBackend(index, name, weights,
                                            backend_options.GetSubdict(name),
                                            shared_threads));
+      i++;
     }
     i = 0;
     for (auto& future : capabilities) {
@@ -419,15 +485,15 @@ class DemuxingBackend final : public Backend {
          << ", lower limit: " << lower_limit_batch_step_;
   }
 
+  void CalibratePerformance();
+
   DemuxingChildBackend::AssignFuture AddBackend(
       int index, const std::string& name,
       const std::optional<WeightsFile>& weights, const OptionsDict& opts,
-      int shared_threads) {
+      std::span<int> shared_threads) {
     const std::string backend = opts.GetOrDefault<std::string>("backend", name);
 
-    return backends_[index].Assign(backend, weights, opts,
-                                   shared_threads,
-                                   backends_.size() / shared_threads);
+    return backends_[index].Assign(backend, weights, opts, shared_threads);
   }
 
   std::unique_ptr<BackendComputation> CreateComputation() override;
