@@ -61,7 +61,6 @@ struct DemuxingWork {
     bool queue_was_idle_ : 1 = false;
   };
   DemuxingComputation* source_ = nullptr;
-  std::unique_ptr<NetworkComputation> computation_;
   int start_ = 0;
   int end_ = 0;
   PredictedTimes predicted_times_;
@@ -72,7 +71,7 @@ struct DemuxingWork {
     assert(start_ != end_);
   }
 
-  void ProcessResults();
+  void ProcessResults(std::unique_ptr<NetworkComputation>& computation);
 
   auto operator<=>(const DemuxingWork& b) const { return end_ <=> b.end_; }
 };
@@ -549,16 +548,6 @@ class DemuxingBackend final : public Backend {
 };
 
 class DemuxingComputation final : public BackendComputation {
-  std::tuple<const std::unique_ptr<NetworkComputation>&, int> GetParent(
-      int sample) const {
-    auto iter =
-        std::lower_bound(children_.begin(), children_.end(), sample + 1);
-    assert(iter != children_.end());
-    assert(sample >= iter->start_);
-    assert(sample < iter->end_);
-    return {iter->computation_, sample - iter->start_};
-  }
-
  public:
   DemuxingComputation(DemuxingBackend* backend)
       : backend_(backend), entries_(backend_->attrs_.maximum_batch_size) {}
@@ -594,7 +583,8 @@ class DemuxingComputation final : public BackendComputation {
     }
   }
 
-  void ProcessResults(const DemuxingWork& work);
+  void ProcessResults(const DemuxingWork& work,
+                      std::unique_ptr<NetworkComputation>& computation);
 
  private:
   DemuxingBackend* backend_;
@@ -609,13 +599,18 @@ class DemuxingComputation final : public BackendComputation {
   friend class DemuxingChildBackend;
 };
 
-void DemuxingWork::ProcessResults() { source_->ProcessResults(*this); }
+void DemuxingWork::ProcessResults(
+    std::unique_ptr<NetworkComputation>& computation) {
+  source_->ProcessResults(*this, computation);
+}
 
-void DemuxingComputation::ProcessResults(const DemuxingWork& work) {
+void DemuxingComputation::ProcessResults(
+    const DemuxingWork& work,
+    std::unique_ptr<NetworkComputation>& computation) {
   size_t size = work.end_ - work.start_;
   for (size_t i = 0; i < size; ++i) {
     entries_[work.start_ + i].ProcessResult(
-        *work.computation_, i, backend_->softmax_policy_temperature_);
+        *computation, i, backend_->softmax_policy_temperature_);
   }
 }
 
@@ -671,15 +666,15 @@ void DemuxingChildBackend::Worker() {
     }
     assert(work);
     LCTRACE_FUNCTION_SCOPE;
-    work->computation_ = network_->NewComputation();
+    auto computation = network_->NewComputation();
     auto& entries = work->source_->entries_;
     for (int i = work->start_; i < work->end_; i++) {
-      work->computation_->AddInput(std::move(entries[i].input));
+      computation->AddInput(std::move(entries[i].input));
     }
     if (work->predicted_times_.queue_was_idle_) {
       StartComputationWhenIdle();
     }
-    work->computation_->ComputeBlocking();
+    computation->ComputeBlocking();
     // TODO: This should read the time from the backend which could use more
     // accurate GPU timers. CPU time has potential for random extra delay
     // sometimes.
@@ -689,7 +684,7 @@ void DemuxingChildBackend::Worker() {
             expected, 1, std::memory_order_relaxed)) {
       work->source_->NotifyFirstDone();
     }
-    work->ProcessResults();
+    work->ProcessResults(computation);
     work->source_->NotifyComplete();
   }
 }
