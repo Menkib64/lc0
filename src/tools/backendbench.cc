@@ -26,6 +26,7 @@
 */
 
 #include "tools/backendbench.h"
+#include <absl/cleanup/cleanup.h>
 
 #include <atomic>
 
@@ -33,8 +34,10 @@
 #include "neural/register.h"
 #include "neural/shared_params.h"
 #include "search/classic/node.h"
+#include "utils/atomic.h"
 #include "utils/numa.h"
 #include "utils/optionsparser.h"
+#include "utils/trace.h"
 
 namespace lczero {
 namespace {
@@ -107,59 +110,62 @@ void BackendBenchmark::Run() {
     EvalPosition pos{tree.GetPositionHistory().GetPositions(), {}};
     std::vector<std::thread> handles;
 
-    // Do any backend initialization outside the loop.
-    auto warm = [&]() {
-      // Give GPU enough work to make it go from idle clocks to max clocks.
-      for (int i = 0; i < 2; i++) {
-        auto warmup = backend->CreateComputation();
-        for (int j = 0; j < option_dict.Get<int>(kMaxBatchSizeId); ++j) {
-          warmup->AddInput(pos, {});
-        }
-        warmup->ComputeBlocking();
-      }
-    };
-    for (int t = 1; t < threads; t++) {
-      handles.emplace_back(warm);
-    }
-    warm();
-    for (auto& handle : handles) {
-      handle.join();
-    }
-    handles.clear();
+    Numa::ReserveSearchWorkers(threads);
 
     const int batches = option_dict.Get<int>(kBatchesId);
-
-    int best = 1;
-    int best2 = 1;
-    int best3 = 1;
-    float best_nps = 0.0f;
-    float best_nps2 = 0.0f;
-    float best_nps3 = 0.0f;
-    std::optional<std::chrono::time_point<std::chrono::steady_clock>> pending;
     using tp = std::chrono::time_point<std::chrono::steady_clock>;
     std::vector<std::vector<tp>> ends(threads);
     for (auto& vend : ends) {
       vend.resize(batches + 1);
     }
     std::vector<std::chrono::duration<double>> times(batches);
-    std::vector<int> thread_counts(threads);
-    for (int i = option_dict.Get<int>(kStartBatchSizeId);
-         i <= option_dict.Get<int>(kMaxBatchSizeId);
-         i += option_dict.Get<int>(kBatchStepId)) {
-      handles.reserve(threads);
-      std::atomic<int> j{0};
-      std::atomic<size_t> first_thread_done{1};
-      std::vector<tp> first_batch_times(threads + 1);
+    std::atomic<int> batches_started{0};
+    std::atomic<size_t> first_thread_done{1};
+    std::vector<tp> first_batch_times(threads + 1);
+    std::vector<WaitableAtomic<int>> thread_counts(threads);
+    for (auto& count : thread_counts) {
+      count.store(-1, std::memory_order_relaxed);
+    }
+    WaitableAtomic<int> batch_size{0};
 
-      auto compute = [&](int tid = 0) {
+    absl::Cleanup stop_threads = [&]() {
+      batch_size.store(-1, std::memory_order_relaxed);
+      batch_size.notify_all();
+      for (auto& handle : handles) {
+        handle.join();
+      }
+    };
+
+    // Do any backend initialization outside the loop.
+    auto compute = [&](int tid) {
+      if (tid > 0 || batch_size.load(std::memory_order_acquire) == 0) {
+        Numa::BindThread(tid);
+        // Give GPU enough work to make it go from idle clocks to max clocks.
+        for (int i = 0; i < 2; i++) {
+          auto warmup = backend->CreateComputation();
+          for (int j = 0; j < option_dict.Get<int>(kMaxBatchSizeId); ++j) {
+            warmup->AddInput(pos, {});
+          }
+          warmup->ComputeBlocking();
+        }
+        if (tid == 0) return;
+        thread_counts[tid].store(0, std::memory_order_release);
+        thread_counts[tid].notify_one();
+      }
+      int bs;
+      while (batch_size.load(std::memory_order_relaxed) >= 0) {
+        batch_size.wait(0, std::memory_order_relaxed);
+        bs = batch_size.load(std::memory_order_acquire);
+        if (bs < 0) break;
+        assert(bs > 0);
         int count = 0;
         bool first = true;
         auto& end = ends[tid];
         // Ignore the first batch to let GPU queue fill for stable measurements.
-        while (j++ < batches) {
+        while (batches_started++ < batches) {
           // Put i copies of tree root node into computation and compute.
           auto computation = backend->CreateComputation();
-          for (int k = 0; k < i; k++) {
+          for (int k = 0; k < bs; k++) {
             computation->AddInput(pos, {});
           }
           computation->ComputeBlocking();
@@ -171,21 +177,52 @@ void BackendBenchmark::Run() {
             first = false;
           }
         }
-        thread_counts[tid] = count;
-      };
+        thread_counts[tid].store(count, std::memory_order_release);
+        thread_counts[tid].notify_one();
+        if (tid == 0) break;
+        thread_counts[tid].wait(count, std::memory_order_relaxed);
+      }
+    };
+    for (int t = 1; t < threads; t++) {
+      handles.emplace_back(compute, t);
+    }
+    compute(0);
+
+    backend->UpdateConfiguration(option_dict);
+
+    for (int t = 1; t < threads; t++) {
+      thread_counts[t].wait(-1, std::memory_order_acquire);
+      thread_counts[t].store(-1, std::memory_order_relaxed);
+    }
+
+    int best = 1;
+    int best2 = 1;
+    int best3 = 1;
+    float best_nps = 0.0f;
+    float best_nps2 = 0.0f;
+    float best_nps3 = 0.0f;
+    std::optional<std::chrono::time_point<std::chrono::steady_clock>> pending;
+    for (int i = option_dict.Get<int>(kStartBatchSizeId);
+         i <= option_dict.Get<int>(kMaxBatchSizeId);
+         i += option_dict.Get<int>(kBatchStepId)) {
+      LCTRACE_FUNCTION_SCOPE;
 
       first_batch_times[0] = std::chrono::steady_clock::now();
 
-      for (int t = 1; t < threads; t++) {
-        handles.emplace_back(compute, t);
-      }
+      first_thread_done.store(1, std::memory_order_relaxed);
+
+      batches_started.store(0, std::memory_order_relaxed);
+
+      batch_size.store(i, std::memory_order_release);
+      batch_size.notify_all();
 
       compute(0);
-      for (auto& handle : handles) {
-        handle.join();
+
+      for (int t = 0; t < threads; t++) {
+        thread_counts[t].wait(-1, std::memory_order_acquire);
       }
 
-      handles.clear();
+      batch_size.store(0, std::memory_order_relaxed);
 
       double stddev = 0;
       double total = 0;
@@ -196,6 +233,8 @@ void BackendBenchmark::Run() {
           total += times[batches_done].count();
           batches_done++;
         }
+        thread_counts[t].store(-1, std::memory_order_relaxed);
+        thread_counts[t].notify_one();
       }
 
       double mean = total / batches_done;
