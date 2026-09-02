@@ -491,7 +491,7 @@ class SearchWorker {
   void InitializeIteration();
 
   // 2. Gather minibatch.
-  void GatherMinibatch();
+  bool GatherMinibatch();
 
   // 2b. Copy collisions into shared_collisions_.
   void CollectCollisions();
@@ -503,7 +503,7 @@ class SearchWorker {
   void FetchMinibatchResults();
 
   // 6. Propagate the new nodes' information to all their parents in the tree.
-  bool DoBackupUpdate();
+  void DoBackupUpdate(bool work_done);
 
   // 7. Update the Search's status and progress information.
   void UpdateCounters(bool work_done);
@@ -615,6 +615,9 @@ class SearchWorker {
     bool CanEvalOutOfOrder(const BackupPath&) const {
       return is_tt_hit || is_cache_hit || is_edge_update;
     }
+    bool IsDelayedCacheHit() const {
+      return is_delayed_cache_hit || is_delayed_tt_hit;
+    }
 
     // The node to extend.
     int eval_index = -1;
@@ -688,6 +691,7 @@ class SearchWorker {
   BackupUpdateResults DoBackupUpdateSingleNode(
       const NodeToProcess& node_to_process, const BackupPath& path);
   bool IsMinibatch(const AtomicVector<NodeToProcess>& batch) const;
+  bool IsOoOBatch(const AtomicVector<NodeToProcess>& batch) const;
 
  private:
   // Returns whether a node's bounds were set based on its children.
@@ -725,12 +729,14 @@ class SearchWorker {
   // Helpers to lookup picked node paths.
  public:
   const BackupPath& GetMinibatchPath(int index) const;
+  const BackupPath& GetDelayedOutOfOrderPath(int index) const;
   const BackupPath& GetOutOfOrderPath(int index) const;
 
  private:
   const BackupPath& GetCollisionPath(int index) const;
   // Helpers to assign picked node paths.
   void AssignMinibatchPath(int index, const BackupPath& path);
+  void AssignDelayedOutOfOrderPath(int index, const BackupPath& path);
   void AssignOutOfOrderPath(int index, const BackupPath& path);
   void AssignCollisionPath(int index, const BackupPath& path);
 
@@ -739,7 +745,6 @@ class SearchWorker {
   int tid_ = -1;
   int target_minibatch_size_;
   int max_out_of_order_;
-  int number_out_of_order_ = 0;
   size_t iteration_memory_age_ = 0;
   std::vector<IterationMemoryManager> iteration_memory_managers_;
   // List of nodes to process.
@@ -839,6 +844,8 @@ struct SearchWorkerCachedState {
                        size_t max_out_of_order);
 
   alignas(kCacheLineSize) AtomicVector<SearchWorker::NodeToProcess> minibatch_;
+  alignas(kCacheLineSize)
+      AtomicVector<SearchWorker::NodeToProcess> delayedooobatch_;
   alignas(kCacheLineSize) AtomicVector<SearchWorker::NodeToProcess> ooobatch_;
   alignas(kCacheLineSize) AtomicVector<SearchWorker::CollisionNode> collisions_;
   std::vector<EvalResult> eval_results_;

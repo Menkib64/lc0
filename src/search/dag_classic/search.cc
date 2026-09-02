@@ -491,30 +491,31 @@ class UpdatePathPointers : public TaskQueue::PickTask {
     for (size_t t = 0; t < state_.worker_states_.size(); t++) {
       if (t == tid_) continue;
       auto& worker_state = state_.worker_states_[t];
-      if (index + worker_state.minibatch_.size() > start_) {
+      size_t batch_size = worker_state.minibatch_.size();
+      if (index + batch_size > start_) {
         size_t begin = index < start_ ? start_ - index : 0;
-        size_t count = std::min(size, worker_state.minibatch_.size() - begin);
+        size_t count = std::min(size, batch_size - begin);
         ranges.emplace_back(worker_state.node_paths_.begin() + begin,
                             worker_state.node_paths_.begin() + begin + count);
         size -= count;
         if (size == 0) break;
       }
-      index += worker_state.minibatch_.size();
+      index += batch_size;
 
-      if (index + worker_state.collisions_.size() > start_) {
+      batch_size = worker_state.delayedooobatch_.size();
+
+      if (index + batch_size > start_) {
         size_t begin = index < start_ ? start_ - index : 0;
-        size_t count = std::min(size, worker_state.collisions_.size() - begin);
+        size_t count = std::min(size, batch_size - begin);
         ranges.emplace_back(worker_state.node_paths_.begin() +
-                                worker_state.minibatch_.capacity() +
-                                worker_state.ooobatch_.capacity() + begin,
+                                worker_state.minibatch_.capacity() + begin,
                             worker_state.node_paths_.begin() +
-                                worker_state.minibatch_.capacity() +
-                                worker_state.ooobatch_.capacity() + begin +
+                                worker_state.minibatch_.capacity() + begin +
                                 count);
         size -= count;
         if (size == 0) break;
       }
-      index += worker_state.collisions_.size();
+      index += batch_size;
     }
 
     assert(size == 0);
@@ -1994,6 +1995,11 @@ void SearchWorkerCachedState::StartANewSearch(const SearchParams& params,
     minibatch_ = std::move(minibatch);
   }
 
+  if (delayedooobatch_.capacity() < max_out_of_order) {
+    decltype(delayedooobatch_) delayedooobatch(max_out_of_order);
+    delayedooobatch_ = std::move(delayedooobatch);
+  }
+
   if (ooobatch_.capacity() < max_out_of_order) {
     decltype(ooobatch_) ooobatch(max_out_of_order);
     ooobatch_ = std::move(ooobatch);
@@ -2009,8 +2015,9 @@ void SearchWorkerCachedState::StartANewSearch(const SearchParams& params,
     eval_results_.resize(eval_size);
   }
 
-  const size_t node_path_size =
-      minibatch_.capacity() + ooobatch_.capacity() + collisions_.capacity();
+  const size_t node_path_size = minibatch_.capacity() +
+                                delayedooobatch_.capacity() +
+                                ooobatch_.capacity() + collisions_.capacity();
   if (node_paths_.size() < node_path_size) {
     node_paths_.resize(node_path_size);
   }
@@ -2090,8 +2097,9 @@ void SchedulePointerUpdateTasks(MakeSolidList& solid_tasks,
     if (t == wid) continue;
     auto& worker = state.worker_states_[t];
     paths += worker.minibatch_.size();
+    paths += worker.delayedooobatch_.size();
     assert(worker.ooobatch_.empty());
-    paths += worker.collisions_.size();
+    assert(worker.collisions_.empty());
   }
 
   const size_t tail_share = 5;
@@ -2231,7 +2239,7 @@ bool SearchWorker::ExecuteOneIteration() {
   InitializeIteration();
 
   // 2. Gather minibatch.
-  GatherMinibatch();
+  bool work_done = GatherMinibatch();
 
   // 4. Run NN computation.
   RunNNComputation();
@@ -2240,7 +2248,7 @@ bool SearchWorker::ExecuteOneIteration() {
   FetchMinibatchResults();
 
   // 6. Propagate the new nodes' information to all their parents in the tree.
-  bool work_done = DoBackupUpdate();
+  DoBackupUpdate(work_done);
 
   // 7. Update the Search's status and progress information.
   UpdateCounters(work_done);
@@ -2326,10 +2334,13 @@ class BackupTask final : public TaskQueue::PickTask {
     for (size_t i = 0; i < size_; ++i) {
       const auto& node_to_process = batch_[i + start_];
       bool is_mini = worker_.IsMinibatch(batch_);
+      bool is_ooo = worker_.IsOoOBatch(batch_);
       const auto& path = is_mini ? worker_.GetMinibatchPath(i + start_)
-                                 : worker_.GetOutOfOrderPath(i + start_);
+                         : is_ooo
+                             ? worker_.GetOutOfOrderPath(i + start_)
+                             : worker_.GetDelayedOutOfOrderPath(i + start_);
 
-      if (!is_mini) {
+      if (is_ooo) {
         worker_.FetchSingleNodeResult(&node_to_process, path);
       }
 
@@ -2407,7 +2418,9 @@ class FetchResultsTask final : public TaskQueue::PickTask {
     LCTRACE_FUNCTION_SCOPE;
     for (size_t i = 0; i < size_; ++i) {
       const auto& node_to_process = batch_[i + start_];
-      const auto& path = worker_.GetMinibatchPath(i + start_);
+      bool is_mini = worker_.IsMinibatch(batch_);
+      const auto& path = is_mini ? worker_.GetMinibatchPath(i + start_)
+                                 : worker_.GetDelayedOutOfOrderPath(i + start_);
       worker_.FetchSingleNodeResult(&node_to_process, path);
     }
   }
@@ -2508,7 +2521,7 @@ int SearchWorker::ExpandCollision(int index, int collisions_left) {
   return total;
 }
 
-void SearchWorker::GatherMinibatch() {
+bool SearchWorker::GatherMinibatch() {
   LCTRACE_FUNCTION_SCOPE;
   // Total number of nodes to process.
   int minibatch_size = 0;
@@ -2537,13 +2550,14 @@ void SearchWorker::GatherMinibatch() {
       std::min(static_cast<int64_t>(cur_n), remaining_n), params_);
   collisions_left_.store(collisions_left, std::memory_order_relaxed);
   // Number of nodes processed out of order.
-  number_out_of_order_ = 0;
+  size_t completed_out_of_order = 0;
+  int number_out_of_order = 0;
 
   // Gather nodes to process in the current batch.
   // If we had too many nodes out of order, also interrupt the iteration so
   // that search can exit.
   while (minibatch_size < target_minibatch_size_ &&
-         number_out_of_order_ < max_out_of_order_ && collisions_left > 0) {
+         number_out_of_order < max_out_of_order_ && collisions_left > 0) {
     // If there is backend work to be done, and the backend is idle - exit
     // immediately.
     // Only do this fancy work if there are multiple threads as otherwise we
@@ -2559,46 +2573,46 @@ void SearchWorker::GatherMinibatch() {
          thread_count - search_->backend_waiting_counter_.load(
                             std::memory_order_relaxed) >
              params_.GetThreadIdlingThreshold())) {
-      return;
+      break;
     }
 
     // Free iteration memory allocations.
     NewMemoryIteration();
 
-    int new_start = state_.minibatch_.size();
     int collisions_start = state_.collisions_.size();
 
     auto [local_collisions, expandable_collision] = PickNodesToExtend(
         std::min({collisions_left, target_minibatch_size_ - minibatch_size,
-                  max_out_of_order_ - number_out_of_order_,
+                  max_out_of_order_ - number_out_of_order,
                   static_cast<int>(state_.minibatch_.capacity()) -
                       static_cast<int>(state_.minibatch_.size())}));
     collisions_left = AddCollisions(local_collisions);
 
     // Count the non-collisions.
-    int new_end = state_.minibatch_.size();
     int collisions_end = state_.collisions_.size();
-    int non_collisions = new_end - new_start;
-    minibatch_size +=
-        non_collisions - std::count_if(state_.minibatch_.begin() + new_start,
-                                       state_.minibatch_.begin() + new_end,
-                                       [](const auto& item) {
-                                         return item.is_delayed_cache_hit ||
-                                                item.is_delayed_tt_hit;
-                                       });
+    size_t ooo_size = state_.ooobatch_.size();
+    minibatch_size = state_.minibatch_.size();
 
-    if (!state_.ooobatch_.empty()) {
+    completed_out_of_order += ooo_size;
+    number_out_of_order =
+        state_.delayedooobatch_.size() + completed_out_of_order;
+
+    assert(thread_count > 1 || (number_out_of_order > 0 || minibatch_size > 0));
+
+    if (minibatch_size == 0 && number_out_of_order == 0) break;
+
+    if (ooo_size != 0) {
       // If there was any OOO, revert 'all' new collisions - it isn't possible
       // to identify exactly which ones are afterwards and only prune those.
       // This may remove too many items, but hopefully most of the time they
       // will just be added back in the same in the next gather.
       size_t threads =
-          state_.ooobatch_.size() < search_->state_.task_queue_.Size() * 4
+          ooo_size < search_->state_.task_queue_.Size() * 4
               ? std::max<size_t>(1, search_->state_.task_queue_.Size())
               : search_->state_.task_queue_.Size() + 1;
-      auto tasks = ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
+      auto tasks =
+          ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
       ScheduleCancelTask(collisions_start, collisions_end, false);
-      number_out_of_order_ += state_.ooobatch_.size();
       for (auto& task : tasks) {
         task.Wait(tid_);
         search_->total_playouts_ += task.result_.total_playouts_;
@@ -2621,8 +2635,9 @@ void SearchWorker::GatherMinibatch() {
       int total = ExpandCollision(expandable_collision, collisions_left);
       collisions_left = AddCollisions(total);
     }
-    if (search_->stop_.load(std::memory_order_acquire)) return;
+    if (search_->stop_.load(std::memory_order_acquire)) break;
   }
+  return number_out_of_order != 0 || minibatch_size != 0;
 }
 
 int SearchWorker::AddCollisions(int collisions) {
@@ -3190,21 +3205,33 @@ void SearchWorker::AssignMinibatchPath(int index, const BackupPath& path) {
   AssignPath(state_.node_paths_[index], path);
 }
 
-const BackupPath& SearchWorker::GetOutOfOrderPath(int index) const {
+const BackupPath& SearchWorker::GetDelayedOutOfOrderPath(int index) const {
   index += state_.minibatch_.capacity();
   return state_.node_paths_[index];
 }
-void SearchWorker::AssignOutOfOrderPath(int index, const BackupPath& path) {
+void SearchWorker::AssignDelayedOutOfOrderPath(int index,
+                                               const BackupPath& path) {
   index += state_.minibatch_.capacity();
   AssignPath(state_.node_paths_[index], path);
 }
 
+const BackupPath& SearchWorker::GetOutOfOrderPath(int index) const {
+  index += state_.minibatch_.capacity() + state_.delayedooobatch_.capacity();
+  return state_.node_paths_[index];
+}
+void SearchWorker::AssignOutOfOrderPath(int index, const BackupPath& path) {
+  index += state_.minibatch_.capacity() + state_.delayedooobatch_.capacity();
+  AssignPath(state_.node_paths_[index], path);
+}
+
 const BackupPath& SearchWorker::GetCollisionPath(int index) const {
-  index += state_.minibatch_.capacity() + state_.ooobatch_.capacity();
+  index += state_.minibatch_.capacity() + state_.delayedooobatch_.capacity() +
+           state_.ooobatch_.capacity();
   return state_.node_paths_[index];
 }
 void SearchWorker::AssignCollisionPath(int index, const BackupPath& path) {
-  index += state_.minibatch_.capacity() + state_.ooobatch_.capacity();
+  index += state_.minibatch_.capacity() + state_.delayedooobatch_.capacity() +
+           state_.ooobatch_.capacity();
   AssignPath(state_.node_paths_[index], path);
 }
 
@@ -3228,6 +3255,11 @@ void SearchWorker::Visit(const BackupPath& path,
   if (params_.GetOutOfOrderEval() && picked_node.CanEvalOutOfOrder(path)) {
     int i = state_.ooobatch_.emplace_back(std::move(picked_node));
     AssignOutOfOrderPath(i, path);
+  } else if (picked_node.IsDelayedCacheHit() ||
+             (!params_.GetOutOfOrderEval() &&
+              picked_node.CanEvalOutOfOrder(path))) {
+    size_t i = state_.delayedooobatch_.emplace_back(std::move(picked_node));
+    AssignDelayedOutOfOrderPath(i, path);
   } else {
     int i = state_.minibatch_.emplace_back(std::move(picked_node));
     AssignMinibatchPath(i, path);
@@ -3352,7 +3384,7 @@ void SearchWorker::ExtendNode(NodeToProcess& picked_node,
         break;
     }
   } else {
-    if (node->GetLowNode()->GetN() == 0) {
+    if (node->GetLowNode()->GetWeight() == 0.0) {
       picked_node.is_delayed_tt_hit = true;
     } else {
       picked_node.is_tt_hit = true;
@@ -3396,6 +3428,8 @@ void SearchWorker::FetchMinibatchResults() {
   NewMemoryIteration();
   ScheduleFetchResultsTasks(*this, search_->state_.task_queue_.Size() + 1,
                             state_.minibatch_);
+  ScheduleFetchResultsTasks(*this, search_->state_.task_queue_.Size() + 1,
+                            state_.delayedooobatch_);
   WaitForTasks();
 }
 
@@ -3458,16 +3492,20 @@ void SearchWorker::FetchSingleNodeResult(const NodeToProcess* node_to_process,
 bool SearchWorker::IsMinibatch(const AtomicVector<NodeToProcess>& batch) const {
   return &batch == &state_.minibatch_;
 }
+bool SearchWorker::IsOoOBatch(const AtomicVector<NodeToProcess>& batch) const {
+  return &batch == &state_.ooobatch_;
+}
 
 // 6. Propagate the new nodes' information to all their parents in the tree.
 // ~~~~~~~~~~~~~~
-bool SearchWorker::DoBackupUpdate() {
+void SearchWorker::DoBackupUpdate(bool work_done) {
   LCTRACE_FUNCTION_SCOPE;
   // Nodes mutex for doing node updates.
   SharedMutex::Lock lock(search_->nodes_mutex_);
-  bool work_done = number_out_of_order_ > 0 || !state_.minibatch_.empty();
   auto tasks = ScheduleBackupUpdateTasks(
       *this, search_->state_.task_queue_.Size() + 1, state_.minibatch_);
+  auto delayed_tasks = ScheduleBackupUpdateTasks(
+      *this, search_->state_.task_queue_.Size() + 1, state_.delayedooobatch_);
   auto& tc = search_->thread_count_;
   int count = tc.load(std::memory_order_relaxed);
   if (count != search_->total_workers_) {
@@ -3496,14 +3534,25 @@ bool SearchWorker::DoBackupUpdate() {
         std::max(search_->max_depth_, task.result_.max_depth_);
   }
 
+  state_.minibatch_.clear();
+
+  for (auto& task : delayed_tasks) {
+    task.Wait(tid_);
+    search_->total_playouts_ += task.result_.total_playouts_;
+    search_->network_evaluations_ += task.result_.network_evaluations_;
+    search_->cum_depth_ += task.result_.cum_depth_;
+    search_->max_depth_ =
+        std::max(search_->max_depth_, task.result_.max_depth_);
+  }
+
   // Always update the best child edge to simplify thread interaction.
   search_->current_best_edge_ =
       search_->GetBestChildNoTemperature(search_->root_node_, 0);
 
-  state_.minibatch_.clear();
-  if (!work_done) return false;
-  search_->total_batches_ += 1;
-  return true;
+  state_.delayedooobatch_.clear();
+  if (work_done) {
+    search_->total_batches_ += 1;
+  }
 }
 
 bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
