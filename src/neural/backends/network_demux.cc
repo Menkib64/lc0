@@ -795,6 +795,12 @@ void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
     std::nth_element(
         begin, last, backend_order.end(),
         [](const BackendSortingOrder& a, const BackendSortingOrder& b) {
+          if (a.work_left == 0 && b.work_left == 0) {
+            return a.work_cost[0] < b.work_cost[0];
+          }
+          if (a.work_left == 0 || b.work_left == 0) {
+            return a.work_left < b.work_left;
+          }
           return a.work_left + a.work_cost[0] < b.work_left + b.work_cost[0];
         });
   }
@@ -806,6 +812,12 @@ void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
     std::nth_element(
         begin, begin + 1, backend_order.end(),
         [](const BackendSortingOrder& a, const BackendSortingOrder& b) {
+          if (a.work_left == 0 && b.work_left == 0) {
+            return a.work_cost[0] < b.work_cost[0];
+          }
+          if (a.work_left == 0 || b.work_left == 0) {
+            return a.work_left < b.work_left;
+          }
           return a.work_left + a.work_cost[1] < b.work_left + b.work_cost[1];
         });
     begin = begin + 1;
