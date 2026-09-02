@@ -522,6 +522,7 @@ struct Config {
     ReportHWLocError(numa_obj =
                          hwloc_get_obj_by_type(topology_, nodetype, node_id));
     ReserveCores(numa_obj, count);
+    core_reservation_id_++;
   }
 
   void ReserveCores(hwloc_obj_t parent, size_t count) {
@@ -693,6 +694,7 @@ struct Config {
   bool shuffle_reservations_ = true;
   bool use_search_shared_core_ = false;
   size_t search_node_id_ = 0;
+  size_t core_reservation_id_ = 0;
   GeneratorType rng_;
 
   hwloc_topology_t topology_ = nullptr;
@@ -751,6 +753,13 @@ void Numa::ReserveSearchWorkers([[maybe_unused]] size_t num_workers) {
 #endif
 }
 
+size_t Numa::GetCoreReservationId() {
+#if HAVE_LIBHWLOC
+  auto config = Config::Lock();
+  return config->core_reservation_id_;
+#endif
+  return 0;
+}
 void Numa::BindTaskWorkersToSocket() {
 #if HAVE_LIBHWLOC
   auto config = Config::Lock();

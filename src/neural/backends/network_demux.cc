@@ -67,9 +67,7 @@ struct DemuxingWork {
 
   DemuxingWork(int sample) : end_(sample) {}
   DemuxingWork(DemuxingComputation* source, int start, int end)
-      : source_(source), start_(start), end_(end) {
-    assert(start_ != end_);
-  }
+      : source_(source), start_(start), end_(end) {}
 
   void ProcessResults(std::unique_ptr<NetworkComputation>& computation);
 
@@ -102,10 +100,12 @@ class DemuxingChildBackend {
         bool numa_cuda_gpu = opts.GetOrDefault<bool>("numa_cuda_gpu", false);
         if (numa_node >= 0) {
           Numa::BindThreadToNode(numa_node);
+          update_thread_bind_work_.start_ = numa_node;
         }
         int gpu = opts.GetOrDefault<int>("gpu", 0);
         if (numa_cuda_gpu) {
           Numa::BindThreadToCudaDevice(gpu);
+          update_thread_bind_work_.end_ = gpu;
         }
         AssingType result = shared_index == 0
                                 ? ConstructBackend(name, weights, opts)
@@ -325,6 +325,25 @@ class DemuxingChildBackend {
 
   void Worker();
 
+  void UpdateThreadBind() {
+    if (update_thread_bind_work_.start_ == -1 &&
+        update_thread_bind_work_.end_ == -1) {
+      return;
+    }
+    update_thread_bind_work_.predicted_times_.prediction = threads_.size();
+    {
+      Mutex::Lock lock(mutex_);
+      for (size_t i = 0; i < threads_.size(); i++) {
+        queue_.push(&update_thread_bind_work_);
+      }
+      State s = worker_state_.load(std::memory_order_relaxed);
+      if (s == SLEEP) {
+        worker_state_.store(DATAQUEUED, std::memory_order_relaxed);
+      }
+    }
+    worker_state_.notify_all();
+  };
+
  private:
   struct IdlePrediction {
     uint64_t last_batch_completed_;
@@ -343,6 +362,7 @@ class DemuxingChildBackend {
   enum State { SLEEP, DATAQUEUED, ABORTED };
   WaitableAtomic<State> worker_state_{SLEEP};
   std::queue<DemuxingWork*> queue_ GUARDED_BY(mutex_);
+  DemuxingWork update_thread_bind_work_{nullptr, -1, -1};
 };
 
 class DemuxingBackend final : public Backend {
@@ -373,6 +393,7 @@ class DemuxingBackend final : public Backend {
         1, backend_options.GetOrDefault<int>("shared_backend_threads", 1));
     minimum_batch_step_ =
         backend_options.GetOrDefault<int>("min_batch_step", 1);
+    core_reservation_id_ = Numa::GetCoreReservationId();
     UpdateConfiguration(options);
     const auto parents = backend_options.ListSubdicts();
     std::vector<DemuxingChildBackend::AssignFuture> capabilities;
@@ -521,6 +542,11 @@ class DemuxingBackend final : public Backend {
         options.Get<std::string>(SharedBackendParams::kWeightsId)) {
       return NEED_RESTART;
     }
+    if (core_reservation_id_ != Numa::GetCoreReservationId()) {
+      for (auto& b : backends_) {
+        b.UpdateThreadBind();
+      }
+    }
     softmax_policy_temperature_ =
         1.0f / options.Get<float>(SharedBackendParams::kPolicySoftmaxTemp);
     fill_empty_history_ = EncodeHistoryFill(
@@ -532,6 +558,7 @@ class DemuxingBackend final : public Backend {
   std::vector<DemuxingChildBackend> backends_;
   BackendAttributes attrs_;
   pblczero::NetworkFormat::InputFormat input_format_;
+  size_t core_reservation_id_ = 0;
   float softmax_policy_temperature_;
   FillEmptyHistory fill_empty_history_;
   int minimum_batch_step_ = 1;
@@ -665,6 +692,20 @@ void DemuxingChildBackend::Worker() {
       }
     }
     assert(work);
+    if (work == &update_thread_bind_work_) {
+      if (update_thread_bind_work_.start_ >= 0) {
+        Numa::BindThreadToNode(update_thread_bind_work_.start_);
+      }
+      if (update_thread_bind_work_.end_ >= 0) {
+        Numa::BindThreadToCudaDevice(update_thread_bind_work_.end_);
+      }
+      std::atomic_ref<uint32_t> prediction(
+          update_thread_bind_work_.predicted_times_.prediction);
+      prediction.fetch_sub(1, std::memory_order_relaxed);
+      MonitorHelper monitor(prediction, 20000);
+      monitor([](uint32_t value) { return value != 0; });
+      continue;
+    }
     LCTRACE_FUNCTION_SCOPE;
     auto computation = network_->NewComputation();
     auto& entries = work->source_->entries_;
