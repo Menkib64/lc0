@@ -688,15 +688,19 @@ class SearchWorker {
       return *this;
     }
   };
+  template <bool use_tasks>
   BackupUpdateResults DoBackupUpdateSingleNode(
       const NodeToProcess& node_to_process, const BackupPath& path);
   bool IsMinibatch(const AtomicVector<NodeToProcess>& batch) const;
   bool IsOoOBatch(const AtomicVector<NodeToProcess>& batch) const;
 
+  size_t GetWorkerCount() const;
+
  private:
   // Returns whether a node's bounds were set based on its children.
-  template <typename L>
-  bool MaybeSetBounds(Node* p, float m, L& low_lock) const;
+  template <bool use_tasks>
+  bool MaybeSetBounds(Node* p, float m,
+                      std::unique_lock<SpinMutex>& low_lock) const;
   std::tuple<int, int> PickNodesToExtend(int collision_limit);
   void ScheduleCancelTask(int start, int end, bool stop);
   int ExpandCollision(int idenx, int collisions_left);

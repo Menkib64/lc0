@@ -2324,17 +2324,22 @@ class BackupTask final : public TaskQueue::PickTask {
 
  private:
   void DoTask(int tid) override {
-    DoBackupUpdateRange(tid);
+    if (worker_.GetWorkerCount() > 0) {
+      DoBackupUpdateRange<true>(tid);
+    } else {
+      DoBackupUpdateRange<false>(tid);
+    }
     done_.store(1, std::memory_order_release);
   }
 
+  template <bool use_tasks>
   void DoBackupUpdateRange(int) {
     LCTRACE_FUNCTION_SCOPE;
     SearchWorker::BackupUpdateResults result{};
+    const bool is_mini = worker_.IsMinibatch(batch_);
+    const bool is_ooo = worker_.IsOoOBatch(batch_);
     for (size_t i = 0; i < size_; ++i) {
       const auto& node_to_process = batch_[i + start_];
-      bool is_mini = worker_.IsMinibatch(batch_);
-      bool is_ooo = worker_.IsOoOBatch(batch_);
       const auto& path = is_mini ? worker_.GetMinibatchPath(i + start_)
                          : is_ooo
                              ? worker_.GetOutOfOrderPath(i + start_)
@@ -2344,7 +2349,8 @@ class BackupTask final : public TaskQueue::PickTask {
         worker_.FetchSingleNodeResult(&node_to_process, path);
       }
 
-      result += worker_.DoBackupUpdateSingleNode(node_to_process, path);
+      result +=
+          worker_.DoBackupUpdateSingleNode<use_tasks>(node_to_process, path);
     }
     result_ = result;
   }
@@ -2610,8 +2616,7 @@ bool SearchWorker::GatherMinibatch() {
           ooo_size < search_->state_.task_queue_.Size() * 4
               ? std::max<size_t>(1, search_->state_.task_queue_.Size())
               : search_->state_.task_queue_.Size() + 1;
-      auto tasks =
-          ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
+      auto tasks = ScheduleBackupUpdateTasks(*this, threads, state_.ooobatch_);
       ScheduleCancelTask(collisions_start, collisions_end, false);
       for (auto& task : tasks) {
         task.Wait(tid_);
@@ -3496,6 +3501,10 @@ bool SearchWorker::IsOoOBatch(const AtomicVector<NodeToProcess>& batch) const {
   return &batch == &state_.ooobatch_;
 }
 
+size_t SearchWorker::GetWorkerCount() const {
+  return search_->state_.task_queue_.Size();
+}
+
 // 6. Propagate the new nodes' information to all their parents in the tree.
 // ~~~~~~~~~~~~~~
 void SearchWorker::DoBackupUpdate(bool work_done) {
@@ -3613,23 +3622,26 @@ bool SearchWorker::MaybeAdjustForTerminalOrTransposition(
 // parent low node and so on until the root is reached. Low node may become a
 // transposition and/or get more information even during this batch. Both low
 // node and node may adjust bounds and become a terminal during this batch.
+template <bool use_tasks>
 SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
-    const NodeToProcess& node_to_process, const BackupPath& path)
-    REQUIRES(search_->nodes_mutex_) {
+    const NodeToProcess& node_to_process, const BackupPath& path) {
   auto [n, nr, nm] = path.back();
 
   const auto& nl = n->GetLowNode();
   using MutexType = std::remove_cvref_t<decltype(nl->GetMutex())>;
   std::unique_lock<MutexType> outer_low_lock;
   // The low node must be locked first if we have a low node.
-  if (nl) {
+  if (use_tasks && nl) {
     outer_low_lock = std::unique_lock<MutexType>(nl->GetMutex());
   }
 
   // We follow the Backup path down to lock node next. It must be locked before
   // low_node is released to prevent another thread from overtaking this thread
   // if it is following the same path.
-  std::unique_lock<MutexType> node_lock(n->GetMutex());
+  std::unique_lock<MutexType> node_lock;
+  if (use_tasks) {
+    node_lock = std::unique_lock<MutexType>(n->GetMutex());
+  }
   // For the first visit to a terminal, maybe update parent bounds too.
   auto update_parent_bounds =
       params_.GetStickyEndgames() && n->IsTerminal() && !n->GetN();
@@ -3654,8 +3666,10 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
       // lets node picking select them after NN evaluation is done.
       // No need to keep locks for CancelScoreUpdate because it uses atomic
       // operations.
-      outer_low_lock.unlock();
-      node_lock.unlock();
+      if (use_tasks) {
+        outer_low_lock.unlock();
+        node_lock.unlock();
+      }
       for (auto it = path.crbegin(); it != path.crend(); ++it) {
         std::get<0>(*it)->CancelScoreUpdate(1);
       }
@@ -3701,7 +3715,7 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     }
   }
 
-  if (outer_low_lock.owns_lock()) [[likely]] {
+  if (use_tasks && outer_low_lock.owns_lock()) [[likely]] {
     outer_low_lock.unlock();
   }
 
@@ -3718,11 +3732,14 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     auto [p, pr, pm] = *it;
     const auto& pl = p->GetLowNode();
 
-    auto low_lock = std::unique_lock<MutexType>(pl->GetMutex());
-    // Node must be unlocked after LowNode has been locked to avoid another
-    // thread overtaking this thread using the same path which would make stack
-    // variable state invalid.
-    node_lock.unlock();
+    std::unique_lock<MutexType> low_lock;
+    if (use_tasks) {
+      low_lock = std::unique_lock<MutexType>(pl->GetMutex());
+      // Node must be unlocked after LowNode has been locked to avoid another
+      // thread overtaking this thread using the same path which would make
+      // stack variable state invalid.
+      node_lock.unlock();
+    }
 
     // If parent low node is already a (new) terminal, then change propagated
     // values and stop terminal adjustment.
@@ -3739,9 +3756,12 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
 
     // Try setting parent bounds except the root or those already terminal.
     update_parent_bounds = update_parent_bounds && p != search_->root_node_ &&
-                           !pl->IsTerminal() && MaybeSetBounds(p, m, low_lock);
+                           !pl->IsTerminal() &&
+                           MaybeSetBounds<use_tasks>(p, m, low_lock);
 
-    node_lock = std::unique_lock<MutexType>(p->GetMutex());
+    if (use_tasks) {
+      node_lock = std::unique_lock<MutexType>(p->GetMutex());
+    }
 
     assert(!p->IsTerminal() ||
            (p->IsTerminal() && pl->IsTerminal() && p->GetWL() == -pl->GetWL() &&
@@ -3760,7 +3780,9 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
     nr = pr;
     nm = pm;
   }
-  node_lock.unlock();
+  if (use_tasks) {
+    node_lock.unlock();
+  }
 
   BackupUpdateResults rv{};
   rv.total_playouts_ = 1;
@@ -3773,8 +3795,9 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   return rv;
 }
 
-template <typename L>
-bool SearchWorker::MaybeSetBounds(Node* p, float m, L& low_lock) const {
+template <bool use_tasks>
+bool SearchWorker::MaybeSetBounds(Node* p, float m,
+                                  std::unique_lock<SpinMutex>& low_lock) const {
   using MutexType = std::remove_cvref_t<decltype(p->GetMutex())>;
   auto losing_m = 0.0f;
   auto prefer_tb = false;
@@ -3794,11 +3817,13 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, L& low_lock) const {
   // MaybeAdjustForTerminalOrTransposition will read new stack values which
   // makes thread local state to be consistent even if another thread
   // overtakes this thread using the same path.
-  low_lock.unlock();
+  if (use_tasks) {
+    low_lock.unlock();
+  }
 
   for (const auto& edge : range) {
     std::unique_lock<MutexType> edge_lock;
-    if (edge.node()) {
+    if (use_tasks && edge.node()) {
       edge_lock = std::unique_lock<MutexType>(edge.node()->GetMutex());
     }
     const auto [edge_lower, edge_upper] = edge.GetBounds();
@@ -3826,7 +3851,9 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, L& low_lock) const {
   // Can't Lose ( 0, 1) -> (-1, 0) Can't Win
   //        Win ( 1, 1) -> (-1,-1) Loss
 
-  low_lock.lock();
+  if (use_tasks) {
+    low_lock.lock();
+  }
 
   // Nothing left to do for ancestors if the parent would be a regular node.
   if (lower == GameResult::BLACK_WON && upper == GameResult::WHITE_WON) {
