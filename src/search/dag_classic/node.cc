@@ -54,6 +54,12 @@ Move Edge::GetMove(bool as_opponent) const {
   m.Flip();
   return m;
 }
+Move EdgeRef::GetMove(bool as_opponent) const {
+  if (!as_opponent) return *move_;
+  Move m = *move_;
+  m.Flip();
+  return m;
+}
 
 // Policy priors (P) are stored in a compressed 16-bit format.
 //
@@ -85,22 +91,33 @@ Move Edge::GetMove(bool as_opponent) const {
 // subtracting the two bits from the input and checking for a negative result
 // (the subtraction works despite crossing from exponent to significand). This
 // is combined with the round-to-nearest addition (1<<11) into one op.
-void Edge::SetP(float p) {
+namespace {
+uint16_t ToPolicy(float p) {
   assert(0.0f <= p && p <= 1.0f);
   constexpr int32_t roundings = (1 << 11) - (3 << 28);
   int32_t tmp;
   std::memcpy(&tmp, &p, sizeof(float));
   tmp += roundings;
-  p_ = (tmp < 0) ? 0 : static_cast<uint16_t>(tmp >> 12);
+  return (tmp < 0) ? 0 : static_cast<uint16_t>(tmp >> 12);
 }
 
-float Edge::GetP() const {
+float FromPolicy(uint16_t p) {
   // Reshift into place and set the assumed-set exponent bits.
-  uint32_t tmp = (static_cast<uint32_t>(p_) << 12) | (3 << 28);
+  uint32_t tmp = (static_cast<uint32_t>(p) << 12) | (3 << 28);
   float ret;
   std::memcpy(&ret, &tmp, sizeof(uint32_t));
   return ret;
 }
+}  // namespace
+
+void Edge::SetP(float p) { p_ = ToPolicy(p); }
+void EdgeRef::SetP(float p) {
+  assert(move_);
+  *policy_ = ToPolicy(p);
+}
+
+float Edge::GetP() const { return FromPolicy(p_); }
+float EdgeRef::GetP() const { return FromPolicy(move_ ? *policy_ : edge_.p_); }
 
 std::string Edge::DebugString() const {
   std::ostringstream oss;
@@ -108,13 +125,18 @@ std::string Edge::DebugString() const {
       << " GetP: " << GetP();
   return oss.str();
 }
+std::string EdgeRef::DebugString() const {
+  if (!move_) {
+    return edge_.DebugString();
+  }
+  std::ostringstream oss;
+  oss << "Move: " << move_->ToString(true) << " p_: " << *policy_
+      << " GetP: " << GetP() << " Ptr: " << policy_;
+  return oss.str();
+}
 
-void Edge::FromMovelist(Edge* dst, const MoveList& moves) {
-  std::transform(moves.begin(), moves.end(), dst, [](Move move) {
-    Edge edge;
-    edge.move_ = move;
-    return edge;
-  });
+void EdgeRef::FromMovelist(EdgeIterator dst, const MoveList& moves) {
+  std::copy(moves.begin(), moves.end(), dst);
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -179,11 +201,11 @@ float Node::GetTotalVisits() const {
   return low_node_ ? low_node_->GetN() : 0.0f;
 }
 
-const Edge& LowNode::GetEdgeAt(uint16_t index) const {
+const EdgeRef LowNode::GetEdgeAt(uint16_t index) const {
   if (solid_edges_) {
     return child_.solid_->GetEdges(num_edges_)[index];
   } else {
-    return child_.first_->GetEdges()[index];
+    return child_.first_->GetEdges(num_edges_)[index];
   }
 }
 
@@ -214,17 +236,16 @@ std::string Node::DebugString() const {
 
 std::string LowNode::DebugString() const {
   std::ostringstream oss;
-  oss << " <LowNode> This:" << this << " Edges:" << GetEdges()
+  oss << " <LowNode> This:" << this
       << " NumEdges:" << static_cast<int>(num_edges_) << " Child:" << GetChild()
       << " WL:" << wl_ << " D:" << d_ << " M:" << m_ << " N:" << weight_
       << " NP:" << num_parents_ << " Term:" << static_cast<int>(terminal_type_)
       << " Bounds:" << static_cast<int>(lower_bound_) - 2 << ","
-      << static_cast<int>(upper_bound_) - 2
-      << " Solid: " << solid_edges_;
+      << static_cast<int>(upper_bound_) - 2 << " Solid: " << solid_edges_;
   return oss.str();
 }
 
-void Edge::SortEdges(Edge* edges, int num_edges) {
+void EdgeRef::SortEdges(EdgeIterator edges, int num_edges) {
   // Sorting on raw p_ is the same as sorting on GetP() as a side effect of
   // the encoding, and its noticeably faster.
   std::sort(edges, (edges + num_edges),
@@ -469,9 +490,10 @@ std::unique_ptr<LowNode::ChildAndEdges> LowNode::ChildAndEdges::FromMovelist(
     const MoveList& moves, uint16_t index) {
   std::unique_ptr<ChildAndEdges> child(ChildAndEdges::Allocate(moves.size()));
 
-  Edge::FromMovelist(child->GetEdges(), moves);
+  EdgeRef::FromMovelist(child->GetEdges(moves.size()), moves);
 
-  std::construct_at(child->GetChild(), child->GetEdges()[index], index);
+  std::construct_at(child->GetChild(), child->GetEdges(moves.size())[index],
+                    index);
 
   return child;
 }
@@ -497,7 +519,7 @@ LowNode::LowNode(const LowNode& node, Move saved_child)
       upper_bound_(node.upper_bound_),
       solid_edges_(false) {
   std::copy(node.GetEdges(), node.GetEdges() + node.num_edges_,
-            child_.first_->GetEdges());
+            child_.first_->GetEdges(num_edges_));
   Node* src = node.child_.first_->GetChild();
   for (; src; src = src->GetSibling()->get()) {
     if (src->GetMove() == saved_child) {
@@ -507,15 +529,16 @@ LowNode::LowNode(const LowNode& node, Move saved_child)
   if (src) {
     std::construct_at(child_.first_->GetChild(), std::move(*src));
   } else {
-    auto edge = std::find_if(node.child_.first_->GetEdges(),
-                             node.child_.first_->GetEdges() + node.num_edges_,
-                             [saved_child](const Edge& edge) {
-                               return edge.GetMove() == saved_child;
-                             });
-    assert(edge != node.child_.first_->GetEdges() + node.num_edges_);
+    auto edge =
+        std::find_if(node.child_.first_->GetEdges(num_edges_),
+                     node.child_.first_->GetEdges(num_edges_) + node.num_edges_,
+                     [saved_child](const Edge& edge) {
+                       return edge.GetMove() == saved_child;
+                     });
+    assert(edge != node.child_.first_->GetEdges(num_edges_) + node.num_edges_);
     // If the saved child is not found, construct a default Node.
     std::construct_at(child_.first_->GetChild(), *edge,
-                      edge - node.child_.first_->GetEdges());
+                      edge - node.child_.first_->GetEdges(num_edges_));
   }
 }
 
@@ -583,7 +606,7 @@ std::unique_ptr<LowNode::SolidChildren> LowNode::SolidChildren::FromMovelist(
     const MoveList& moves) {
   std::unique_ptr<SolidChildren> child(SolidChildren::Allocate(moves.size()));
 
-  Edge::FromMovelist(child->GetEdges(moves.size()), moves);
+  EdgeRef::FromMovelist(child->GetEdges(moves.size()), moves);
 
   for (size_t index = 0; index < moves.size(); ++index) {
     std::construct_at(child->GetChild() + index,
@@ -594,7 +617,7 @@ std::unique_ptr<LowNode::SolidChildren> LowNode::SolidChildren::FromMovelist(
 }
 
 std::unique_ptr<LowNode::SolidChildren> LowNode::SolidChildren::Make(
-    uint8_t num_edges, Node* child, Edge* edges) {
+    uint8_t num_edges, Node* child, EdgeIterator edges) {
   // Allocate and construct a SoldChildren from ChildAndEdges
   std::unique_ptr<SolidChildren> solid(SolidChildren::Allocate(num_edges));
   Node* dst = solid->GetChild();
@@ -651,7 +674,7 @@ LowNode::PointerChanges* LowNode::MakeSolid(bool no_results) {
     }
   }
   auto solid = SolidChildren::Make(num_edges_, child_.first_->GetChild(),
-                                   child_.first_->GetEdges());
+                                   child_.first_->GetEdges(num_edges_));
   NGC::Instance().AddToGcQueue(child_.first_);
   child_.solid_ = solid.release();
   solid_edges_ = true;
@@ -816,8 +839,7 @@ void LowNode::DotNodeString(std::ofstream& oss) const {
       << std::showpos                                    //
       << "\\nBounds=" << static_cast<int>(lower_bound_) - 2 << ","
       << static_cast<int>(upper_bound_) - 2 << std::noshowpos  //
-      << "\\n\\nThis=" << this << "\\nEdges=" << GetEdges()
-      << "\\nNumEdges=" << static_cast<int>(num_edges_)
+      << "\\n\\nThis=" << this << "\\nNumEdges=" << static_cast<int>(num_edges_)
       << "\\nChild=" << GetChild() << "\\n\"";
   oss << "];" << std::endl;
 }

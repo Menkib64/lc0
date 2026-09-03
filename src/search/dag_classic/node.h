@@ -176,9 +176,6 @@ class atomic_unique_ptr {
 class Node;
 class Edge {
  public:
-  // Creates array of edges from the list of moves.
-  static void FromMovelist(Edge* dst, const MoveList& moves);
-
   // Returns move from the point of view of the player making it (if as_opponent
   // is false) or as opponent (if as_opponent is true).
   Move GetMove(bool as_opponent = false) const;
@@ -194,6 +191,8 @@ class Edge {
   static void SortEdges(Edge* edges, int num_edges);
 
  private:
+  Edge() = default;
+  Edge(Move move, uint16_t policy) : move_(move), p_(policy) {}
   // Move corresponding to this node. From the point of view of a player,
   // i.e. black's e7e5 is stored as e2e4.
   // Root node contains move a1a1.
@@ -203,7 +202,137 @@ class Edge {
   // network; compressed to a 16 bit format (5 bits exp, 11 bits significand).
   uint16_t p_ = 0;
   friend class Node;
+  friend class EdgeRef;
 };
+
+class EdgeIterator;
+class EdgeRef {
+ public:
+  // Creates array of edges from the list of moves.
+  static void FromMovelist(EdgeIterator dst, const MoveList& moves);
+
+  EdgeRef(Move* move, uint16_t* policy) : move_(move), policy_(policy) {}
+  EdgeRef(const EdgeRef& other) = delete;
+  EdgeRef(EdgeRef&& other) : edge_{*other.move_, *other.policy_} {
+  }
+
+  EdgeRef& operator=(Move move) {
+    assert(move_);
+    *move_ = move;
+    return *this;
+  }
+
+  EdgeRef& operator=(const EdgeRef& other) = delete;
+  EdgeRef& operator=(EdgeRef&& other) {
+    assert(move_);
+    *move_ = other.move_ ? *other.move_ : other.edge_.move_;
+    *policy_ = other.move_ ? *other.policy_ : other.edge_.p_;
+    return *this;
+  }
+
+  Move GetMove(bool as_opponent = false) const;
+  float GetP() const;
+  void SetP(float val);
+
+  std::string DebugString() const;
+
+  static void SortEdges(EdgeIterator edges, int num_edges);
+
+  friend void swap(EdgeRef a, EdgeRef b) {
+    assert(a.move_ && b.move_);
+    std::swap(*a.move_, *b.move_);
+    std::swap(*a.policy_, *b.policy_);
+  }
+
+  EdgeRef* operator->() { return this; }
+
+  operator Edge() const { return move_ ? Edge{*move_, *policy_} : edge_; }
+
+ private:
+  Move* move_ = nullptr;
+  uint16_t* policy_ = nullptr;
+  Edge edge_;
+};
+
+class EdgeIterator {
+ public:
+  using iterator_category = std::random_access_iterator_tag;
+  using value_type = EdgeRef;
+  using difference_type = std::ptrdiff_t;
+  using pointer = EdgeRef*;
+
+  EdgeIterator() = default;
+  EdgeIterator(Move* moves, uint16_t* policy)
+      : moves_(moves), policy_(policy) {}
+
+  EdgeIterator& operator++() {
+    ++moves_;
+    ++policy_;
+    return *this;
+  }
+  EdgeIterator operator++(int) {
+    EdgeIterator tmp = *this;
+    ++*this;
+    return tmp;
+  }
+  EdgeIterator& operator--() {
+    --moves_;
+    --policy_;
+    return *this;
+  }
+  EdgeIterator operator--(int) {
+    EdgeIterator tmp = *this;
+    --*this;
+    return tmp;
+  }
+
+  EdgeIterator& operator+=(ptrdiff_t n) {
+    moves_ += n;
+    policy_ += n;
+    return *this;
+  }
+  EdgeIterator operator+(ptrdiff_t n) const {
+    EdgeIterator tmp = *this;
+    tmp += n;
+    return tmp;
+  }
+  friend EdgeIterator operator+(ptrdiff_t n, const EdgeIterator& it) {
+    return it + n;
+  }
+  EdgeIterator& operator-=(ptrdiff_t n) {
+    moves_ -= n;
+    policy_ -= n;
+    return *this;
+  }
+  EdgeIterator operator-(ptrdiff_t n) const {
+    EdgeIterator tmp = *this;
+    tmp -= n;
+    return tmp;
+  }
+  ptrdiff_t operator-(const EdgeIterator& other) const {
+    return moves_ - other.moves_;
+  }
+
+  EdgeRef operator*() const { return {moves_, policy_}; }
+  EdgeRef operator[](ptrdiff_t n) const { return {moves_ + n, policy_ + n}; }
+  EdgeRef operator->() const { return {moves_, policy_}; }
+
+  auto operator<=>(const EdgeIterator& other) const {
+    return moves_ <=> other.moves_;
+  }
+  auto operator==(const EdgeIterator& other) const {
+    return moves_ == other.moves_;
+  }
+
+  explicit operator bool() const { return moves_ != nullptr; }
+
+ private:
+  Move* moves_ = nullptr;
+  uint16_t* policy_ = nullptr;
+};
+
+static_assert(std::random_access_iterator<EdgeIterator>,
+              "EdgeIterator is not a random access iterator");
 
 struct Eval {
   double wl;
@@ -611,7 +740,7 @@ class LowNode {
     assert(weight_ == 0);
     assert(GetChild()->GetNStarted() == 0);
 
-    Edge* edges = GetEdges();
+    auto edges = GetEdges();
 
     assert(edges);
 
@@ -653,8 +782,8 @@ class LowNode {
 
   uint8_t GetNumEdges() const { return num_edges_; }
   // Gets pointer to the start of the edge array.
-  Edge* GetEdges() const {
-    return !solid_edges_ ? child_.first_->GetEdges()
+  EdgeIterator GetEdges() const {
+    return !solid_edges_ ? child_.first_->GetEdges(num_edges_)
                          : child_.solid_->GetEdges(num_edges_);
   }
 
@@ -684,7 +813,7 @@ class LowNode {
   void ReleaseChildrenExceptOne(Move move);
 
   // Return move policy for edge/node at @index.
-  const Edge& GetEdgeAt(uint16_t index) const;
+  const EdgeRef GetEdgeAt(uint16_t index) const;
   // Return child node at @index.
   Node* GetChildAt(uint16_t index) const;
 
@@ -696,7 +825,7 @@ class LowNode {
   void SortEdges() {
     assert(child_.first_);
     assert(GetChild()->GetNStarted() == 0);
-    Edge::SortEdges(GetEdges(), num_edges_);
+    EdgeRef::SortEdges(GetEdges(), num_edges_);
     // Copy the best edge to the preallocated first child.
     if (solid_edges_) {
       for (size_t i = 0; i < num_edges_; ++i) {
@@ -904,11 +1033,21 @@ class LowNode {
     Node* changes_[];
   };
 
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#elif defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
   // Store the first child and edges in the same memory allocation.
   class ChildAndEdges {
    public:
     Node* GetChild() const { return const_cast<Node*>(&child_); }
-    Edge* GetEdges() const { return const_cast<Edge*>(edges_); }
+    EdgeIterator GetEdges(uint8_t num_edges) const {
+      Move* move = reinterpret_cast<Move*>(const_cast<Node*>(&GetChild()[1]));
+      uint16_t* policy = reinterpret_cast<uint16_t*>(move + num_edges);
+      return {move, policy};
+    }
 
     // Creates a new ChildAndEdges object with a moves list.
     static std::unique_ptr<ChildAndEdges> FromMovelist(const MoveList& moves,
@@ -921,27 +1060,23 @@ class LowNode {
 
    private:
     Node child_;
-    Edge edges_[];
   };
-
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#elif defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
   // Store all children and edges in the same allocation.
   class SolidChildren {
    public:
     ~SolidChildren();
     static std::unique_ptr<SolidChildren> Make(uint8_t num_edges, Node* child,
-                                               Edge* edges);
+                                               EdgeIterator edges);
     static std::unique_ptr<SolidChildren> FromMovelist(const MoveList& moves);
     static SolidChildren* Allocate(size_t num_edges);
     static void operator delete(SolidChildren* ptr, std::destroying_delete_t);
     Node* GetChild() const { return const_cast<Node*>(&child_); }
-    Edge* GetEdges(uint8_t num_edges) const {
-      return reinterpret_cast<Edge*>(const_cast<Node*>(&GetChild()[num_edges]));
+    EdgeIterator GetEdges(uint8_t num_edges) const {
+      Move* move =
+          reinterpret_cast<Move*>(const_cast<Node*>(&GetChild()[num_edges]));
+      uint16_t* policy = reinterpret_cast<uint16_t*>(move + num_edges);
+      return {move, policy};
     }
 
    private:
@@ -1010,9 +1145,9 @@ static_assert(sizeof(LowNode) <= 64, "LowNode is too large");
 class EdgeAndNode {
  public:
   EdgeAndNode() = default;
-  EdgeAndNode(Edge* edge, Node* node) : edge_(edge), node_(node) {}
-  void Reset() { edge_ = nullptr; }
-  explicit operator bool() const { return edge_ != nullptr; }
+  EdgeAndNode(EdgeIterator edge, Node* node) : edge_(edge), node_(node) {}
+  void Reset() { edge_ = EdgeIterator{}; }
+  explicit operator bool() const { return !!edge_; }
   bool operator==(const EdgeAndNode& other) const {
     return edge_ == other.edge_;
   }
@@ -1020,7 +1155,7 @@ class EdgeAndNode {
     return edge_ != other.edge_;
   }
   bool HasNode() const { return node_ != nullptr; }
-  Edge* edge() const { return edge_; }
+  EdgeIterator edge() const { return edge_; }
   Node* node() const { return node_; }
 
   // Proxy functions for easier access to node/edge.
@@ -1070,7 +1205,7 @@ class EdgeAndNode {
  protected:
   // nullptr means that the whole pair is "null". (E.g. when search for a node
   // didn't find anything, or as end iterator signal).
-  Edge* edge_ = nullptr;
+  EdgeIterator edge_;
   // nullptr means that the edge doesn't yet have node extended.
   Node* node_ = nullptr;
 };
@@ -1106,8 +1241,9 @@ class Edge_Iterator : public EdgeAndNode {
 
   // Creates "begin()" iterator.
   Edge_Iterator(LowNode* parent_node)
-      : EdgeAndNode(parent_node != nullptr ? parent_node->GetEdges() : nullptr,
-                    parent_node ? parent_node->GetChild() : nullptr) {
+      : EdgeAndNode(
+            parent_node != nullptr ? parent_node->GetEdges() : EdgeIterator{},
+            parent_node ? parent_node->GetChild() : nullptr) {
     if (parent_node != nullptr) {
       assert(node_->Index() == 0);
       node_ptr_ = node_->GetSibling();
@@ -1124,7 +1260,7 @@ class Edge_Iterator : public EdgeAndNode {
   void operator++() {
     // If it was the last edge in array, become end(), otherwise advance.
     if (++current_idx_ == total_count_) {
-      edge_ = nullptr;
+      edge_ = EdgeIterator{};
     } else {
       ++edge_;
       Actualize();
