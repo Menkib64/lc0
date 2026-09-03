@@ -27,6 +27,8 @@
 
 #include "engine_loop.h"
 
+#include <absl/cleanup/cleanup.h>
+
 #include <iostream>
 
 #include "engine.h"
@@ -67,6 +69,10 @@ void RunEngine(SearchFactory* factory) {
   // Create engine.
   Engine engine(*factory, options);
   UciLoop loop(&uci_responder, &options_parser, &engine);
+  absl::Cleanup cleanup = [&engine]() {
+    engine.Stop();
+    engine.Wait();
+  };
 
   // Run the stdin loop.
   std::cout.setf(std::ios::unitbuf);
