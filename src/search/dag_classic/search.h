@@ -499,9 +499,6 @@ class SearchWorker {
   // 4. Run NN computation.
   void RunNNComputation();
 
-  // 5. Retrieve NN computations (and terminal values) into nodes.
-  void FetchMinibatchResults();
-
   // 6. Propagate the new nodes' information to all their parents in the tree.
   void DoBackupUpdate(bool work_done);
 

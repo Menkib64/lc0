@@ -2244,9 +2244,6 @@ bool SearchWorker::ExecuteOneIteration() {
   // 4. Run NN computation.
   RunNNComputation();
 
-  // 5. Retrieve NN computations (and terminal values) into nodes.
-  FetchMinibatchResults();
-
   // 6. Propagate the new nodes' information to all their parents in the tree.
   DoBackupUpdate(work_done);
 
@@ -2345,10 +2342,6 @@ class BackupTask final : public TaskQueue::PickTask {
                              ? worker_.GetOutOfOrderPath(i + start_)
                              : worker_.GetDelayedOutOfOrderPath(i + start_);
 
-      if (is_ooo) {
-        worker_.FetchSingleNodeResult(&node_to_process, path);
-      }
-
       result +=
           worker_.DoBackupUpdateSingleNode<use_tasks>(node_to_process, path);
     }
@@ -2401,77 +2394,6 @@ TaskArray<BackupTask> ScheduleBackupUpdateTasks(
   assert(start == positions);
   worker.SubmitTasks(tasks);
   return tasks;
-}
-
-// Schedule fetch results tasks. It could make backup propagation to scale
-// better to more thread if this was merged together. Tasks would need carefully
-// scheduling to allow many transpositions to allow any transposition to read
-// results while only reading them once.
-class FetchResultsTask final : public TaskQueue::PickTask {
- public:
-  FetchResultsTask(SearchWorker& worker,
-                   const AtomicVector<SearchWorker::NodeToProcess>& batch,
-                   size_t start, size_t size)
-      : worker_(worker), batch_(batch), start_(start), size_(size) {}
-
- private:
-  void DoTask(int tid) override {
-    DoFetchResultsRange(tid);
-    worker_.CompleteTask();
-  }
-
-  void DoFetchResultsRange(int) {
-    LCTRACE_FUNCTION_SCOPE;
-    for (size_t i = 0; i < size_; ++i) {
-      const auto& node_to_process = batch_[i + start_];
-      bool is_mini = worker_.IsMinibatch(batch_);
-      const auto& path = is_mini ? worker_.GetMinibatchPath(i + start_)
-                                 : worker_.GetDelayedOutOfOrderPath(i + start_);
-      worker_.FetchSingleNodeResult(&node_to_process, path);
-    }
-  }
-
- private:
-  SearchWorker& worker_;
-  const AtomicVector<SearchWorker::NodeToProcess>& batch_;
-  unsigned start_;
-  unsigned size_;
-};
-
-void ScheduleFetchResultsTasks(
-    SearchWorker& worker, size_t workers,
-    const AtomicVector<SearchWorker::NodeToProcess>& batch) {
-  if (batch.empty()) return;
-
-  const size_t tail_share = 8;
-  size_t positions = batch.size();
-  bool use_small_tail = positions >= tail_share * workers && workers > 1;
-  TaskArray<FetchResultsTask> tasks(workers * (use_small_tail ? 2 : 1));
-  size_t first_positions =
-      use_small_tail ? positions * (tail_share - 1) / tail_share : positions;
-  size_t positions_per_task = first_positions / workers;
-  size_t extra_positions = first_positions % workers;
-  size_t start = 0;
-  for (size_t i = 0; i < workers; ++i) {
-    size_t size = positions_per_task + (i < extra_positions ? 1 : 0);
-    if (size == 0) break;
-    tasks.emplace_back(worker, batch, start, size);
-    start += size;
-  }
-  if (use_small_tail) {
-    size_t tail_positions = positions - first_positions;
-    size_t tail_per_task = tail_positions / workers;
-    size_t tail_extra = tail_positions % workers;
-    for (size_t i = 0; i < workers; ++i) {
-      size_t size = tail_per_task + (i < tail_extra ? 1 : 0);
-      if (size == 0) break;
-      tasks.emplace_back(worker, batch, start, size);
-      start += size;
-    }
-  }
-  assert(start == positions);
-  worker.StartTasks(tasks.size());
-  worker.SubmitTasks(tasks);
 }
 
 }  // namespace
@@ -3424,23 +3346,9 @@ void SearchWorker::RunNNComputation() {
 
 // 5. Retrieve NN computations (and terminal values) into nodes.
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-void SearchWorker::FetchMinibatchResults() {
-  LCTRACE_FUNCTION_SCOPE;
-  // Wait for output tasks to complete before entering mutex to avoid deadlock
-  // if output task wants to execute in this thread.
-  output_task_.Wait(tid_);
-  SharedMutex::Lock lock(search_->nodes_mutex_);
-  NewMemoryIteration();
-  ScheduleFetchResultsTasks(*this, search_->state_.task_queue_.Size() + 1,
-                            state_.minibatch_);
-  ScheduleFetchResultsTasks(*this, search_->state_.task_queue_.Size() + 1,
-                            state_.delayedooobatch_);
-  WaitForTasks();
-}
-
 void SearchWorker::FetchSingleNodeResult(const NodeToProcess* node_to_process,
                                          const BackupPath& path) {
-  if (!node_to_process->nn_queried) return;
+  assert(node_to_process->nn_queried);
 
   assert(node_to_process->eval_index >= 0);
   assert(node_to_process->eval_index < (int)state_.eval_results_.size());
@@ -3510,7 +3418,9 @@ size_t SearchWorker::GetWorkerCount() const {
 void SearchWorker::DoBackupUpdate(bool work_done) {
   LCTRACE_FUNCTION_SCOPE;
   // Nodes mutex for doing node updates.
+  output_task_.Wait(tid_);
   SharedMutex::Lock lock(search_->nodes_mutex_);
+  NewMemoryIteration();
   auto tasks = ScheduleBackupUpdateTasks(
       *this, search_->state_.task_queue_.Size() + 1, state_.minibatch_);
   auto delayed_tasks = ScheduleBackupUpdateTasks(
@@ -3633,6 +3543,10 @@ SearchWorker::BackupUpdateResults SearchWorker::DoBackupUpdateSingleNode(
   // The low node must be locked first if we have a low node.
   if (use_tasks && nl) {
     outer_low_lock = std::unique_lock<MutexType>(nl->GetMutex());
+  }
+
+  if (node_to_process.nn_queried) {
+    FetchSingleNodeResult(&node_to_process, path);
   }
 
   // We follow the Backup path down to lock node next. It must be locked before
