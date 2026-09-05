@@ -41,16 +41,9 @@ PERFETTO_DEFINE_CATEGORIES(
 #endif
 
 namespace lczero {
+void TraceInititialize();
 #if USE_PERFETTO_TRACE
 #define LCTRACE_DECLARE_CATEGORIES PERFETTO_TRACK_EVENT_STATIC_STORAGE();
-
-#define LCTRACE_INITIALIZE                     \
-  do {                                         \
-    perfetto::TracingInitArgs args;            \
-    args.backends |= perfetto::kSystemBackend; \
-    perfetto::Tracing::Initialize(args);       \
-    perfetto::TrackEvent::Register();          \
-  } while (false)
 
 #define LCTRACE_FUNCTION_SCOPE \
   const auto& name = __func__; \
@@ -58,7 +51,6 @@ namespace lczero {
 
 #elif USE_NVTX_TRACE
 #define LCTRACE_DECLARE_CATEGORIES /* nop */
-#define LCTRACE_INITIALIZE         /* nop */
 struct lc0_domain {
   static constexpr char name[] = "lc0";
 };

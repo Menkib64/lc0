@@ -78,8 +78,8 @@ void ChooseAndRunEngine() {
 }  // namespace lczero
 
 int main(int argc, const char** argv) {
-  LCTRACE_INITIALIZE;
   using namespace lczero;
+  TraceInititialize();
   EscCodes::Init();
   LOGFILE << "Lc0 started.";
   CERR << EscCodes::Bold() << EscCodes::Red() << "       _";

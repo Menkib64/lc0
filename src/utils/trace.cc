@@ -27,4 +27,22 @@
 
 #include "trace.h"
 
+#include <thread>
+
 LCTRACE_DECLARE_CATEGORIES;
+
+namespace lczero {
+
+void TraceInititialize() {
+#if USE_PERFETTO_TRACE
+  perfetto::TracingInitArgs args;
+  args.backends |= perfetto::kSystemBackend;
+  // Allocate 4 pages per CPU thread, but at least 256KB which is the default
+  // size.
+  args.shmem_size_hint_kb =
+      std::max<uint32_t>(4 * 4 * std::thread::hardware_concurrency(), 256);
+  perfetto::Tracing::Initialize(args);
+  perfetto::TrackEvent::Register();
+#endif
+}
+}  // namespace lczero
