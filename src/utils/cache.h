@@ -92,7 +92,7 @@ class HashKeyedCache {
  public:
   static constexpr bool kIsManagedPointerType = IsManagedPointerType<V>::value;
   using element_type = V;
-  using pointer = HashValueToPointer<V, kIsManagedPointerType>::type;
+  using pointer = typename HashValueToPointer<V, kIsManagedPointerType>::type;
 
  private:
   static constexpr size_t kElementsInBucket = 32;

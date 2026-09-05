@@ -511,13 +511,13 @@ LowNode::LowNode(const LowNode& node, Move saved_child)
     : wl_(node.wl_),
       d_(node.d_),
       weight_(node.weight_),
-      child_(ChildAndEdges::Allocate(node.num_edges_)),
       m_(node.m_),
       num_edges_(node.num_edges_),
       terminal_type_(node.terminal_type_),
       lower_bound_(node.lower_bound_),
       upper_bound_(node.upper_bound_),
       solid_edges_(false) {
+  child_.first_ = ChildAndEdges::Allocate(node.num_edges_);
   std::copy(node.GetEdges(), node.GetEdges() + node.num_edges_,
             child_.first_->GetEdges(num_edges_));
   Node* src = node.child_.first_->GetChild();
@@ -1106,7 +1106,8 @@ void NodeGarbageCollector<Types>::Abort() {
 }
 
 template <typename Types>
-NodeGarbageCollector<Types>::State NodeGarbageCollector<Types>::Wait() const {
+typename NodeGarbageCollector<Types>::State NodeGarbageCollector<Types>::Wait()
+    const {
   State s;
   while ((s = state_.load(std::memory_order_acquire)) != Sleeping) {
     assert(s != Exit);

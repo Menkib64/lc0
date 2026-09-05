@@ -27,6 +27,7 @@
 
 #include "utils/numa.h"
 
+#include <algorithm>
 #include <numeric>
 
 #include "numa_config.h"

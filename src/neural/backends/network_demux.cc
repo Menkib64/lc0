@@ -348,6 +348,11 @@ class DemuxingChildBackend {
   struct IdlePrediction {
     uint64_t last_batch_completed_;
     uint64_t queued_work_ns_;
+
+    IdlePrediction() = default;
+    IdlePrediction(uint64_t last_batch_completed, uint64_t queued_work_ns)
+        : last_batch_completed_(last_batch_completed),
+          queued_work_ns_(queued_work_ns) {}
   };
 
   // Runtime constant variables
@@ -758,6 +763,11 @@ void DemuxingComputation::ComputeBlocking(ComputationCallback callback) {
     auto operator<=>(const BackendSortingOrder& b) const {
       return work_left <=> b.work_left;
     }
+
+    BackendSortingOrder() = default;
+    BackendSortingOrder(uint32_t idx, uint32_t work_left,
+                        std::array<uint32_t, 2> work_cost)
+        : idx(idx), work_left(work_left), work_cost(work_cost) {}
   };
 
   // Do basic load balancing based on predicted time until idle.

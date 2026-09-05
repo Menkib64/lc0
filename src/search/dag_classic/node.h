@@ -30,11 +30,10 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <mutex>
+#include <variant>
 
 #if __cpp_lib_atomic_wait < 201907L
 #define NO_STD_ATOMIC_WAIT 1
