@@ -34,7 +34,10 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <cstdio>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <semaphore>
 #include <span>
@@ -406,20 +409,48 @@ void DecodeWdl(std::span<const float> logits, EvalResultPtr result) {
   if (result.d) *result.d = draw * scale;
 }
 
+// The semaphore admits `concurrency` threads; this hands each of them a
+// distinct index so they address disjoint cached executions.
+struct ExecutionSlotPool {
+  std::mutex mutex;
+  std::vector<bool> in_use;
+};
+
 class ExecutionPermit {
  public:
-  explicit ExecutionPermit(std::counting_semaphore<>& semaphore)
-      : semaphore_(semaphore) {
+  ExecutionPermit(std::counting_semaphore<>& semaphore,
+                  ExecutionSlotPool* pool = nullptr)
+      : semaphore_(semaphore), pool_(pool) {
     semaphore_.acquire();
+    if (pool_) {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      for (std::size_t i = 0; i < pool_->in_use.size(); ++i) {
+        if (!pool_->in_use[i]) {
+          pool_->in_use[i] = true;
+          index_ = i;
+          break;
+        }
+      }
+    }
   }
 
-  ~ExecutionPermit() { semaphore_.release(); }
+  ~ExecutionPermit() {
+    if (pool_) {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->in_use[index_] = false;
+    }
+    semaphore_.release();
+  }
 
   ExecutionPermit(const ExecutionPermit&) = delete;
   ExecutionPermit& operator=(const ExecutionPermit&) = delete;
 
+  std::size_t index() const { return index_; }
+
  private:
   std::counting_semaphore<>& semaphore_;
+  ExecutionSlotPool* pool_ = nullptr;
+  std::size_t index_ = 0;
 };
 
 class Lc0exCudaBackend;
@@ -450,6 +481,25 @@ class Lc0exCudaBackendComputation final : public BackendComputation {
   AtomicVector<Entry> entries_;
 };
 
+// `auto` is the DAG graph (R34). R22 keyed this on the configured concurrency,
+// because the graph then measured +25 % with one execution slot in flight and
+// -9 % with two. That penalty was the graph serialising against *synchronous*
+// host-to-device copies, not against the second slot: once the copies moved onto
+// the slot's non-blocking stream the sign flipped, and the graph is now +7.2 %
+// at two threads and batch 16 and never negative in a search. `linear` and `off`
+// remain for diagnosis -- `off` in particular, because a graph-launched backend
+// needs `nsys --cuda-graph-trace=node` to show its kernels at all.
+lc0ex::GraphMode ResolveGraphMode(const std::string& value) {
+  if (value == "dag" || value == "on") return lc0ex::GraphMode::kDag;
+  if (value == "linear") return lc0ex::GraphMode::kLinear;
+  if (value == "off") return lc0ex::GraphMode::kOff;
+  if (value != "auto") {
+    throw Exception("Unknown lc0ex graph mode '" + value +
+                    "'; expected auto, dag, linear or off.");
+  }
+  return lc0ex::GraphMode::kDag;
+}
+
 class Lc0exCudaBackend final : public Backend {
  public:
   Lc0exCudaBackend(const WeightsFile& weights, const OptionsDict& options,
@@ -463,6 +513,11 @@ class Lc0exCudaBackend final : public Backend {
         input_format_(weights.format().network_format().input()) {
     UpdateConfiguration(options);
 
+    const int concurrency =
+        std::max(1, backend_options.GetOrDefault<int>("concurrency", 1));
+    execution_slot_pool_.in_use.assign(concurrency, false);
+    executions_.resize(concurrency);
+
     const std::string lc0ex_path = backend_options.Get<std::string>("lc0ex");
     if (lc0ex_path.empty()) {
       throw Exception("The lc0ex-cuda backend requires an lc0ex path.");
@@ -471,11 +526,27 @@ class Lc0exCudaBackend final : public Backend {
     const auto executable_proto = LoadExecutableFile(lc0ex_path);
     CheckNetworkFingerprint(weights, executable_proto);
 
+    // Off by default: it is a strict win only above the ladder's dense band,
+    // which a search at --minibatch-size equal to the top dense rung never
+    // reaches. Worth turning on for a minibatch-128 configuration.
+    split_programs_ = backend_options.GetOrDefault<bool>("split_programs", false);
     const int gpu = backend_options.GetOrDefault<int>("gpu", 0);
-    runtime_ = lc0ex::CreateLc0exCudaRuntime(gpu);
+    runtime_ = lc0ex::CreateLc0exCudaRuntime(
+        gpu, ResolveGraphMode(
+                 backend_options.GetOrDefault<std::string>("graph", "auto")));
     executable_ = runtime_->Load(executable_proto);
     InitializePrograms();
     UploadWeights(weights, *executable_, backend_options);
+  }
+
+  ~Lc0exCudaBackend() override {
+    // Members are destroyed in reverse declaration order, which would free the
+    // Executable before the Executions that point into it: ~Lc0exCudaExecution
+    // reads executable_->context_retained_, synchronises the slot's stream and
+    // frees pinned staging in that context. Clearing the cache here is what
+    // orders it correctly. Without this every lc0ex process segfaults on exit,
+    // after all of its output, which is why it went unnoticed for three rounds.
+    executions_.clear();
   }
 
   BackendAttributes GetAttributes() const override { return attributes_; }
@@ -503,6 +574,40 @@ class Lc0exCudaBackend final : public Backend {
     return UPDATE_OK;
   }
 
+  // LC0EX_BATCH_HIST=1 records the batch sizes the search actually asks for.
+  // The ladder rounds each one UP to the next compiled program, so the shape of
+  // this histogram -- not the rung rates -- decides how much of the machine the
+  // deployed artifact really uses. Printed once at exit.
+  static void RecordBatch(std::size_t batch_size, std::size_t program_size) {
+    static const bool enabled = [] {
+      const char* value = std::getenv("LC0EX_BATCH_HIST");
+      return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) return;
+    static std::mutex mutex;
+    static std::map<std::size_t, std::size_t> requested;
+    static std::size_t asked = 0;
+    static std::size_t served = 0;
+    static bool registered = false;
+    const std::lock_guard<std::mutex> lock(mutex);
+    requested[batch_size]++;
+    asked += batch_size;
+    served += program_size;
+    if (!registered) {
+      registered = true;
+      std::atexit([] {
+        std::fprintf(stderr, "\n### lc0ex batch histogram (requested -> count)\n");
+        for (const auto& [size, count] : requested) {
+          std::fprintf(stderr, "%zu %zu\n", size, count);
+        }
+        std::fprintf(stderr, "### positions asked %zu, positions computed %zu, "
+                             "ladder efficiency %.4f\n",
+                     asked, served,
+                     served ? static_cast<double>(asked) / served : 0.0);
+      });
+    }
+  }
+
   const ProgramSpec& FindProgram(std::size_t batch_size) const {
     const auto iter = std::lower_bound(
         programs_.begin(), programs_.end(), batch_size,
@@ -513,12 +618,67 @@ class Lc0exCudaBackend final : public Backend {
       throw Exception("NN input exceeds maximum lc0ex batch size of " +
                       std::to_string(attributes_.maximum_batch_size) + ".");
     }
+    RecordBatch(batch_size, iter->batch_size);
     return *iter;
   }
 
-  std::unique_ptr<lc0ex::Execution> CreateExecution(
-      const ProgramSpec& program) {
-    return executable_->CreateExecution(*program.program);
+  // Two programs instead of one padded program. For a formed batch `b` with
+  // rungs r1 <= b < round_up, running r1 on the first r1 positions and the
+  // smallest rung >= (b - r1) on the rest computes r1 + r2 padded positions
+  // instead of round_up. Taken only when that is a strict saving by at least
+  // `kSplitMargin`, because the split costs a second launch sequence and a
+  // second output gather.
+  //
+  // Returns nullptr when the batch is on a rung, when no split helps, or when
+  // the option is off.
+  struct SplitPlan {
+    const ProgramSpec* first;
+    const ProgramSpec* second;
+    std::size_t first_count;
+  };
+
+  std::optional<SplitPlan> FindSplit(std::size_t batch_size) const {
+    if (!split_programs_) return std::nullopt;
+    const auto up = std::lower_bound(
+        programs_.begin(), programs_.end(), batch_size,
+        [](const ProgramSpec& program, std::size_t size) {
+          return program.batch_size < size;
+        });
+    if (up == programs_.end()) return std::nullopt;
+    if (up->batch_size == batch_size) return std::nullopt;  // already exact
+    if (up == programs_.begin()) return std::nullopt;       // below every rung
+
+    const ProgramSpec& first = *(up - 1);          // largest rung < batch_size
+    const std::size_t rest = batch_size - first.batch_size;
+    const auto second = std::lower_bound(
+        programs_.begin(), programs_.end(), rest,
+        [](const ProgramSpec& program, std::size_t size) {
+          return program.batch_size < size;
+        });
+    if (second == programs_.end()) return std::nullopt;
+
+    const std::size_t split_padded = first.batch_size + second->batch_size;
+    if (split_padded + kSplitMargin > up->batch_size) return std::nullopt;
+    return SplitPlan{&first, &(*second), first.batch_size};
+  }
+
+  // One Execution per (concurrency slot, program), created on first use and
+  // kept for the backend's lifetime. Rebuilding it per inference cost a slot
+  // acquisition plus two heap vectors for each of the ~232 nodes, and with a
+  // graph mode it would also rebuild the graph every time.
+  lc0ex::Execution& GetExecution(std::size_t slot, const ProgramSpec& program) {
+    auto& by_program = executions_[slot];
+    const auto* key = program.program;
+    const auto iter = by_program.find(key);
+    if (iter != by_program.end()) return *iter->second;
+    // Every program on this concurrency slot shares one device execution
+    // slot: only one of them is ever in flight here.
+    lc0ex::Execution* sibling =
+        by_program.empty() ? nullptr : by_program.begin()->second.get();
+    auto execution = executable_->CreateExecution(*program.program, sibling);
+    auto* result = execution.get();
+    by_program.emplace(key, std::move(execution));
+    return *result;
   }
 
  private:
@@ -573,8 +733,15 @@ class Lc0exCudaBackend final : public Backend {
         static_cast<int>(programs_.back().batch_size);
   }
 
+  static constexpr std::size_t kSplitMargin = 8;
+
   BackendAttributes attributes_;
+  bool split_programs_ = false;
   std::counting_semaphore<> execution_semaphore_;
+  ExecutionSlotPool execution_slot_pool_;
+  std::vector<std::unordered_map<const lc0ex::Program*,
+                                 std::unique_ptr<lc0ex::Execution>>>
+      executions_;
   const std::string backend_options_;
   const std::string weights_path_;
   const pblczero::NetworkFormat::InputFormat input_format_;
@@ -638,8 +805,9 @@ void Lc0exCudaBackendComputation::ComputeBlocking() {
   const std::size_t actual_batch = entries_.size();
   if (actual_batch == 0) return;
 
-  const ProgramSpec& program = backend_->FindProgram(actual_batch);
-  auto execution = backend_->CreateExecution(program);
+  const auto split = backend_->FindSplit(actual_batch);
+  const ProgramSpec& program =
+      split ? *split->first : backend_->FindProgram(actual_batch);
 
   std::vector<std::uint64_t> masks(actual_batch * kInputPlanes);
   std::vector<float> values(actual_batch * kInputPlanes);
@@ -653,32 +821,60 @@ void Lc0exCudaBackendComputation::ComputeBlocking() {
 
   const auto mask_bytes = std::as_bytes(std::span<const std::uint64_t>(masks));
   const auto value_bytes = std::as_bytes(std::span<const float>(values));
-  execution->GetBuffer(*program.input_masks)
-      .CopyFromHost(mask_bytes, mask_bytes.size());
-  execution->GetBuffer(*program.input_values)
-      .CopyFromHost(value_bytes, value_bytes.size());
 
   std::vector<float> policy(actual_batch * kNumOutputPolicy);
   std::vector<float> wdl(actual_batch * kNumWdlOutputs);
   std::vector<float> mlh;
   if (program.output_mlh) mlh.resize(actual_batch);
 
-  {
-    ExecutionPermit permit(backend_->execution_semaphore_);
-    execution->Run();
-    execution->Synchronize();
-  }
-
   const auto policy_bytes = std::as_writable_bytes(std::span<float>(policy));
-  execution->GetBuffer(*program.output_policy)
-      .CopyToHost(policy_bytes, policy_bytes.size());
   const auto wdl_bytes = std::as_writable_bytes(std::span<float>(wdl));
-  execution->GetBuffer(*program.output_wdl)
-      .CopyToHost(wdl_bytes, wdl_bytes.size());
-  if (program.output_mlh) {
-    const auto mlh_bytes = std::as_writable_bytes(std::span<float>(mlh));
-    execution->GetBuffer(*program.output_mlh)
-        .CopyToHost(mlh_bytes, mlh_bytes.size());
+
+  // Everything is issued on this slot's stream, so the copies overlap another
+  // slot's kernels. All of it, including the reads, completes at Synchronize().
+  //
+  // `part` runs `count` positions starting at `offset` on one program. The two
+  // halves of a split share one device slot, so the first is fully synchronised
+  // -- outputs already copied out -- before the second touches the allocation.
+  {
+    ExecutionPermit permit(backend_->execution_semaphore_,
+                           &backend_->execution_slot_pool_);
+    const auto part = [&](const ProgramSpec& spec, std::size_t offset,
+                          std::size_t count) {
+      lc0ex::Execution& execution = backend_->GetExecution(permit.index(), spec);
+      execution.GetBuffer(*spec.input_masks)
+          .CopyFromHostAsync(mask_bytes.subspan(offset * kInputPlanes *
+                                                sizeof(std::uint64_t)),
+                             count * kInputPlanes * sizeof(std::uint64_t));
+      execution.GetBuffer(*spec.input_values)
+          .CopyFromHostAsync(
+              value_bytes.subspan(offset * kInputPlanes * sizeof(float)),
+              count * kInputPlanes * sizeof(float));
+      execution.Run();
+      execution.GetBuffer(*spec.output_policy)
+          .CopyToHostAsync(
+              policy_bytes.subspan(offset * kNumOutputPolicy * sizeof(float)),
+              count * kNumOutputPolicy * sizeof(float));
+      execution.GetBuffer(*spec.output_wdl)
+          .CopyToHostAsync(
+              wdl_bytes.subspan(offset * kNumWdlOutputs * sizeof(float)),
+              count * kNumWdlOutputs * sizeof(float));
+      if (spec.output_mlh) {
+        const auto mlh_bytes = std::as_writable_bytes(std::span<float>(mlh));
+        execution.GetBuffer(*spec.output_mlh)
+            .CopyToHostAsync(mlh_bytes.subspan(offset * sizeof(float)),
+                             count * sizeof(float));
+      }
+      execution.Synchronize();
+    };
+
+    if (split) {
+      part(*split->first, 0, split->first_count);
+      part(*split->second, split->first_count,
+           actual_batch - split->first_count);
+    } else {
+      part(program, 0, actual_batch);
+    }
   }
 
   for (std::size_t sample = 0; sample < actual_batch; ++sample) {

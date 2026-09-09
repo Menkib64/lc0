@@ -33,6 +33,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -303,14 +305,15 @@ class Lc0exCudaProgram;
 struct Lc0exCudaExecutionSlot {
   Lc0exCudaAllocation allocation_;
   CUstream stream_ = nullptr;
-  CUgraphExec graph_exec_ = nullptr;
-  const Lc0exCudaProgram* captured_program_ = nullptr;
   bool in_use_ = false;
 };
 
+// The instantiated graph belongs to the Execution, not the slot. Upstream keyed
+// it on the slot and rebuilt it whenever the slot's program changed; with
+// sibling executions sharing one slot, every batch-size change would rebuild it.
+// One graph per (slot, program) Execution is built once and kept.
 void DestroyExecutionSlot(Lc0exCudaExecutionSlot& slot) {
   if (slot.stream_) IgnoreCuda(cuStreamSynchronize(slot.stream_));
-  if (slot.graph_exec_) IgnoreCuda(cuGraphExecDestroy(slot.graph_exec_));
   if (slot.allocation_.base_) IgnoreCuda(cuMemFree(slot.allocation_.base_));
   if (slot.stream_) IgnoreCuda(cuStreamDestroy(slot.stream_));
 }
@@ -346,18 +349,42 @@ class Lc0exCudaProgram final : public Program {
 class Lc0exCudaBuffer final : public Buffer {
  public:
   Lc0exCudaBuffer(Lc0exCudaExecutable* executable, const BufferInfo* info,
-                  CUdeviceptr address)
-      : executable_(executable), info_(info), address_(address) {}
+                  CUdeviceptr address, CUstream stream = nullptr)
+      : executable_(executable),
+        info_(info),
+        address_(address),
+        stream_(stream) {}
+  ~Lc0exCudaBuffer() override;
 
   const BufferInfo& GetInfo() const override { return *info_; }
   void CopyFromHost(std::span<const std::byte> source,
                     std::optional<std::size_t> size_bytes) override;
   void CopyToHost(std::span<std::byte> destination,
                   std::optional<std::size_t> size_bytes) const override;
+  void CopyFromHostAsync(std::span<const std::byte> source,
+                         std::optional<std::size_t> size_bytes) override;
+  void CopyToHostAsync(std::span<std::byte> destination,
+                       std::optional<std::size_t> size_bytes) override;
+
+  // Copies the staged bytes of a completed CopyToHostAsync into the caller's
+  // destination. Called by Lc0exCudaExecution::Synchronize().
+  void CompletePendingRead();
 
   Lc0exCudaExecutable* executable_;
   const BufferInfo* info_;
   CUdeviceptr address_;
+  // Null for persistent buffers, which have no execution stream and therefore
+  // fall back to the synchronous path.
+  CUstream stream_ = nullptr;
+
+ private:
+  // Grows the pinned staging area to at least `size_bytes` and returns it.
+  std::byte* Staging(std::size_t size_bytes);
+
+  std::byte* staging_ = nullptr;
+  std::size_t staging_size_ = 0;
+  std::span<std::byte> pending_destination_;
+  std::size_t pending_size_ = 0;
 };
 
 class Lc0exCudaParameter final : public Parameter {
@@ -396,7 +423,9 @@ class Lc0exCudaParameter final : public Parameter {
 
 class Lc0exCudaExecutable final : public Executable {
  public:
-  explicit Lc0exCudaExecutable(CUdevice device) : device_(device) {}
+  Lc0exCudaExecutable(CUdevice device, GraphMode graph_mode)
+      : device_(device), graph_mode_(graph_mode) {}
+  GraphMode GetGraphMode() const { return graph_mode_; }
   ~Lc0exCudaExecutable() override;
 
   const TargetInfo& GetTarget() const override { return target_; }
@@ -446,6 +475,8 @@ class Lc0exCudaExecutable final : public Executable {
   Buffer& GetBuffer(const BufferInfo& info) override;
 
   std::unique_ptr<Execution> CreateExecution(const Program& program) override;
+  std::unique_ptr<Execution> CreateExecution(const Program& program,
+                                             Execution* sibling) override;
 
   Lc0exCudaExecutionSlot* AcquireExecutionSlot();
   void ReleaseExecutionSlot(Lc0exCudaExecutionSlot* slot);
@@ -461,6 +492,7 @@ class Lc0exCudaExecutable final : public Executable {
   CUdevice device_ = 0;
   CUcontext context_ = nullptr;
   bool context_retained_ = false;
+  GraphMode graph_mode_ = GraphMode::kDag;
 
   TargetInfo target_;
   std::string metadata_;
@@ -510,9 +542,14 @@ class Lc0exCudaExecution final : public Execution {
     for (auto& parameter : parameters_) parameter.Reset();
   }
 
-  void Initialize() {
+  void Initialize(Lc0exCudaExecutionSlot* shared_slot = nullptr) {
     executable_->SetCurrent();
-    slot_ = executable_->AcquireExecutionSlot();
+    if (shared_slot != nullptr) {
+      slot_ = shared_slot;
+      owns_slot_ = false;
+    } else {
+      slot_ = executable_->AcquireExecutionSlot();
+    }
 
     buffers_.resize(program_->buffer_plans_.size());
     for (std::size_t i = 0; i < program_->buffer_plans_.size(); ++i) {
@@ -520,7 +557,7 @@ class Lc0exCudaExecution final : public Execution {
       auto address = slot_->allocation_.address_;
       address += plan.offset_bytes_;
       buffers_[i] = std::make_unique<Lc0exCudaBuffer>(
-          executable_, &program_->buffer_infos_[i], address);
+          executable_, &program_->buffer_infos_[i], address, slot_->stream_);
     }
 
     parameters_.reserve(program_->parameters_.size());
@@ -568,17 +605,21 @@ class Lc0exCudaExecution final : public Execution {
     }
   }
 
-  void Run() override {
-    executable_->SetCurrent();
-    in_flight_ = true;
-    if (slot_->graph_exec_ != nullptr && slot_->captured_program_ == program_) {
-      LC0EX_CUDA_CHECK(cuGraphLaunch(slot_->graph_exec_, slot_->stream_));
-      return;
+  void LaunchNodes() {
+    for (std::size_t i = 0; i < program_->nodes_.size(); ++i) {
+      const auto& node = program_->nodes_[i];
+      LC0EX_CUDA_CHECK(
+          cuLaunchKernel(node.function_, node.grid_[0], node.grid_[1],
+                         node.grid_[2], node.block_[0], node.block_[1],
+                         node.block_[2], node.dynamic_shared_memory_bytes_,
+                         slot_->stream_, launch_arguments_[i].data(), nullptr));
     }
-    if (slot_->graph_exec_ != nullptr) {
-      cuGraphExecDestroy(slot_->graph_exec_);
-      slot_->graph_exec_ = nullptr;
-    }
+  }
+
+  // Upstream's graph: edges are the node dependencies, so independent kernels
+  // may be co-scheduled. R22 priced this at +25 % with one execution slot in
+  // flight and -9 % with two, hence GraphMode.
+  bool BuildDagGraph() {
     CUgraph graph = nullptr;
     LC0EX_CUDA_CHECK(cuGraphCreate(&graph, 0));
 
@@ -604,14 +645,71 @@ class Lc0exCudaExecution final : public Execution {
         deps.push_back(graph_nodes[dep_idx]);
       }
 
-      LC0EX_CUDA_CHECK(cuGraphAddKernelNode(
-          &graph_nodes[i], graph, deps.data(), deps.size(), &params));
+      LC0EX_CUDA_CHECK(cuGraphAddKernelNode(&graph_nodes[i], graph, deps.data(),
+                                            deps.size(), &params));
     }
 
-    LC0EX_CUDA_CHECK(cuGraphInstantiate(&slot_->graph_exec_, graph, 0));
-    LC0EX_CUDA_CHECK(cuGraphDestroy(graph));
-    slot_->captured_program_ = program_;
-    LC0EX_CUDA_CHECK(cuGraphLaunch(slot_->graph_exec_, slot_->stream_));
+    const CUresult status = cuGraphInstantiate(&graph_exec_, graph, 0);
+    IgnoreCuda(cuGraphDestroy(graph));
+    if (status != CUDA_SUCCESS) {
+      graph_exec_ = nullptr;
+      graph_failed_ = true;
+      return false;
+    }
+    IgnoreCuda(cuGraphUpload(graph_exec_, slot_->stream_));
+    return true;
+  }
+
+  // Stream capture of the plain launch loop: a linear graph, so no cross-kernel
+  // concurrency, only the per-launch host cost removed. Note that capture
+  // *records* rather than runs, so a failed instantiate still owes the work.
+  bool CaptureLinearGraph() {
+    CUgraph graph = nullptr;
+    LC0EX_CUDA_CHECK(cuStreamBeginCapture_v2(
+        slot_->stream_, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL));
+    LaunchNodes();
+    LC0EX_CUDA_CHECK(cuStreamEndCapture(slot_->stream_, &graph));
+    const CUresult status = cuGraphInstantiate(&graph_exec_, graph, 0);
+    IgnoreCuda(cuGraphDestroy(graph));
+    if (status != CUDA_SUCCESS) {
+      graph_exec_ = nullptr;
+      graph_failed_ = true;
+      LaunchNodes();
+      return false;
+    }
+    IgnoreCuda(cuGraphUpload(graph_exec_, slot_->stream_));
+    return true;
+  }
+
+  void Run() override {
+    executable_->SetCurrent();
+    in_flight_ = true;
+    if (graph_exec_ != nullptr) {
+      LC0EX_CUDA_CHECK(cuGraphLaunch(graph_exec_, slot_->stream_));
+      return;
+    }
+    // A graph freezes kernel argument values at instantiate time, so a program
+    // that declares parameters is never captured.
+    if (!graph_failed_ && parameters_.empty()) {
+      switch (executable_->GetGraphMode()) {
+        case GraphMode::kDag:
+          if (BuildDagGraph()) {
+            LC0EX_CUDA_CHECK(cuGraphLaunch(graph_exec_, slot_->stream_));
+            return;
+          }
+          break;
+        case GraphMode::kLinear:
+          // Capture recorded the work rather than running it; on success the
+          // graph still has to be launched, on failure LaunchNodes already ran.
+          if (CaptureLinearGraph()) {
+            LC0EX_CUDA_CHECK(cuGraphLaunch(graph_exec_, slot_->stream_));
+          }
+          return;
+        case GraphMode::kOff:
+          break;
+      }
+    }
+    LaunchNodes();
   }
 
   void Synchronize() override {
@@ -619,11 +717,15 @@ class Lc0exCudaExecution final : public Execution {
     executable_->SetCurrent();
     LC0EX_CUDA_CHECK(cuStreamSynchronize(slot_->stream_));
     in_flight_ = false;
+    for (auto& buffer : buffers_) buffer->CompletePendingRead();
   }
 
   Lc0exCudaExecutable* executable_;
   const Lc0exCudaProgram* program_;
+  CUgraphExec graph_exec_ = nullptr;
+  bool graph_failed_ = false;
   Lc0exCudaExecutionSlot* slot_ = nullptr;
+  bool owns_slot_ = true;
   bool in_flight_ = false;
   std::vector<std::unique_ptr<Lc0exCudaBuffer>> buffers_;
   std::vector<Lc0exCudaParameter> parameters_;
@@ -700,11 +802,79 @@ Lc0exCudaExecutable::~Lc0exCudaExecutable() {
   IgnoreCuda(cuDevicePrimaryCtxRelease(device_));
 }
 
+Lc0exCudaBuffer::~Lc0exCudaBuffer() {
+  if (!staging_) return;
+  if (executable_->context_retained_ &&
+      cuCtxSetCurrent(executable_->context_) == CUDA_SUCCESS) {
+    IgnoreCuda(cuMemFreeHost(staging_));
+  }
+  staging_ = nullptr;
+}
+
+std::byte* Lc0exCudaBuffer::Staging(std::size_t size_bytes) {
+  if (staging_size_ >= size_bytes) return staging_;
+  if (staging_) {
+    IgnoreCuda(cuMemFreeHost(staging_));
+    staging_ = nullptr;
+    staging_size_ = 0;
+  }
+  void* host = nullptr;
+  LC0EX_CUDA_CHECK(cuMemHostAlloc(&host, size_bytes, CU_MEMHOSTALLOC_PORTABLE));
+  staging_ = static_cast<std::byte*>(host);
+  staging_size_ = size_bytes;
+  return staging_;
+}
+
+void Lc0exCudaBuffer::CopyFromHostAsync(std::span<const std::byte> source,
+                                        std::optional<std::size_t> size_bytes) {
+  const std::size_t copy_size = size_bytes.value_or(source.size());
+  if (copy_size == 0) return;
+  if (stream_ == nullptr) {
+    CopyFromHost(source, copy_size);
+    return;
+  }
+
+  executable_->SetCurrent();
+  std::byte* staging = Staging(copy_size);
+  std::memcpy(staging, source.data(), copy_size);
+  LC0EX_CUDA_CHECK(cuMemcpyHtoDAsync(address_, staging, copy_size, stream_));
+}
+
+void Lc0exCudaBuffer::CopyToHostAsync(std::span<std::byte> destination,
+                                      std::optional<std::size_t> size_bytes) {
+  const std::size_t copy_size = size_bytes.value_or(destination.size());
+  if (copy_size == 0) return;
+  if (stream_ == nullptr) {
+    CopyToHost(destination, copy_size);
+    return;
+  }
+
+  executable_->SetCurrent();
+  std::byte* staging = Staging(copy_size);
+  LC0EX_CUDA_CHECK(cuMemcpyDtoHAsync(staging, address_, copy_size, stream_));
+  pending_destination_ = destination;
+  pending_size_ = copy_size;
+}
+
+void Lc0exCudaBuffer::CompletePendingRead() {
+  if (pending_size_ == 0) return;
+  std::memcpy(pending_destination_.data(), staging_, pending_size_);
+  pending_size_ = 0;
+  pending_destination_ = {};
+}
+
 Lc0exCudaExecution::~Lc0exCudaExecution() {
   if (!executable_ || !slot_ || !executable_->context_retained_) return;
   if (cuCtxSetCurrent(executable_->context_) == CUDA_SUCCESS) {
     IgnoreCuda(cuStreamSynchronize(slot_->stream_));
-    executable_->ReleaseExecutionSlot(slot_);
+    if (graph_exec_) {
+      IgnoreCuda(cuGraphExecDestroy(graph_exec_));
+      graph_exec_ = nullptr;
+    }
+    // Buffers hold pinned staging tied to this context; free them while it is
+    // still current, and before a shared slot can be handed to anyone else.
+    buffers_.clear();
+    if (owns_slot_) executable_->ReleaseExecutionSlot(slot_);
     slot_ = nullptr;
   }
 }
@@ -728,7 +898,9 @@ Lc0exCudaExecutionSlot* Lc0exCudaExecutable::AcquireExecutionSlot() {
       execution_pool_allocation_.alignment_bytes_;
 
   SetCurrent();
-  LC0EX_CUDA_CHECK(cuStreamCreate(&slot->stream_, CU_STREAM_DEFAULT));
+  // Non-blocking: a default-flag stream serialises against the legacy default
+  // stream, which defeats the overlap the async copy path exists for.
+  LC0EX_CUDA_CHECK(cuStreamCreate(&slot->stream_, CU_STREAM_NON_BLOCKING));
   if (slot->allocation_.size_bytes_ != 0) {
     const auto memory = AllocateDeviceMemory(
         slot->allocation_.size_bytes_, slot->allocation_.alignment_bytes_);
@@ -748,9 +920,17 @@ void Lc0exCudaExecutable::ReleaseExecutionSlot(Lc0exCudaExecutionSlot* slot) {
 
 std::unique_ptr<Execution> Lc0exCudaExecutable::CreateExecution(
     const Program& program) {
+  return CreateExecution(program, nullptr);
+}
+
+std::unique_ptr<Execution> Lc0exCudaExecutable::CreateExecution(
+    const Program& program, Execution* sibling) {
   const auto* cuda_program = static_cast<const Lc0exCudaProgram*>(&program);
   auto execution = std::make_unique<Lc0exCudaExecution>(this, cuda_program);
-  execution->Initialize();
+  execution->Initialize(
+      sibling == nullptr
+          ? nullptr
+          : static_cast<Lc0exCudaExecution*>(sibling)->slot_);
   return execution;
 }
 
@@ -992,7 +1172,8 @@ void BuildPrograms(Lc0exCudaExecutable& executable,
 
 class Lc0exCudaRuntime final : public Runtime {
  public:
-  explicit Lc0exCudaRuntime(int device_ordinal) {
+  Lc0exCudaRuntime(int device_ordinal, GraphMode graph_mode)
+      : graph_mode_(graph_mode) {
     LC0EX_CUDA_CHECK(cuInit(0));
     LC0EX_CUDA_CHECK(cuDeviceGet(&device_, device_ordinal));
   }
@@ -1004,7 +1185,8 @@ class Lc0exCudaRuntime final : public Runtime {
       throw Exception("Unsupported lc0ex format generation.");
     }
 
-    auto executable = std::make_unique<Lc0exCudaExecutable>(device_);
+    auto executable =
+        std::make_unique<Lc0exCudaExecutable>(device_, graph_mode_);
     executable->Initialize();
     executable->target_.vendor = pblczero::Target::VENDOR_NVIDIA;
     executable->target_.architecture =
@@ -1022,12 +1204,14 @@ class Lc0exCudaRuntime final : public Runtime {
 
  private:
   CUdevice device_ = 0;
+  GraphMode graph_mode_ = GraphMode::kDag;
 };
 
 }  // namespace
 
-std::unique_ptr<Runtime> CreateLc0exCudaRuntime(int device_ordinal) {
-  return std::make_unique<Lc0exCudaRuntime>(device_ordinal);
+std::unique_ptr<Runtime> CreateLc0exCudaRuntime(int device_ordinal,
+                                                GraphMode graph_mode) {
+  return std::make_unique<Lc0exCudaRuntime>(device_ordinal, graph_mode);
 }
 
 }  // namespace lc0ex

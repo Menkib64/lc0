@@ -32,7 +32,18 @@
 namespace lczero {
 namespace lc0ex {
 
-std::unique_ptr<Runtime> CreateLc0exCudaRuntime(int device_ordinal = 0);
+// How an Execution issues its kernel launch loop.
+//   kOff    - a plain launch loop, one cuLaunchKernel per node.
+//   kDag    - upstream's behaviour: a CUDA graph whose edges are the node
+//             dependencies, so independent kernels may run concurrently.
+//   kLinear - stream capture of the plain launch loop into a linear graph:
+//             the launch-overhead saving without the cross-kernel concurrency.
+// R22 measured kDag at +25 % with one execution slot in flight and -9 % with
+// two, so the choice has to be made by the caller, not baked in.
+enum class GraphMode { kOff, kDag, kLinear };
+
+std::unique_ptr<Runtime> CreateLc0exCudaRuntime(
+    int device_ordinal = 0, GraphMode graph_mode = GraphMode::kDag);
 
 }  // namespace lc0ex
 }  // namespace lczero

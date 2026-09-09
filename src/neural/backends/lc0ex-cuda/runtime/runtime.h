@@ -83,6 +83,18 @@ class Buffer {
   virtual void CopyToHost(
       std::span<std::byte> destination,
       std::optional<std::size_t> size_bytes = std::nullopt) const = 0;
+
+  // Asynchronous variants. The copy is issued on the execution's stream and is
+  // only complete once Execution::Synchronize() returns; until then the caller
+  // must not touch `source`, and `destination` holds no valid data. Pageable
+  // host memory is accepted: the implementation stages through pinned memory it
+  // owns, which is what allows the copy to overlap another slot's kernels.
+  virtual void CopyFromHostAsync(
+      std::span<const std::byte> source,
+      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
+  virtual void CopyToHostAsync(
+      std::span<std::byte> destination,
+      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
 };
 
 class Parameter {
@@ -146,6 +158,12 @@ class Executable {
   // Persistent storage is shared by all Executions; callers must not modify it
   // while an Execution that may access it is in flight.
   virtual Buffer& GetBuffer(const BufferInfo& info) = 0;
+
+  // Creates an execution that reuses `sibling`'s device execution slot and
+  // stream. Only one of the executions sharing a slot may be in flight at a
+  // time; the caller guarantees that. Passing nullptr allocates a fresh slot.
+  virtual std::unique_ptr<Execution> CreateExecution(const Program& program,
+                                                     Execution* sibling) = 0;
 
   virtual std::unique_ptr<Execution> CreateExecution(
       const Program& program) = 0;
