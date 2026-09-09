@@ -47,7 +47,7 @@ class Numa {
   // Mustbe called before any threads are bound.
   static void ReserveSearchWorkers(size_t num_search_workers);
 
-  static size_t GetCoreReservationId();
+  static size_t GetCoreReservationCounter();
 
   // Bind task workers to a socket.
   static void BindTaskWorkersToSocket();

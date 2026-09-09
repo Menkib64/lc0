@@ -754,7 +754,7 @@ void Numa::ReserveSearchWorkers([[maybe_unused]] size_t num_workers) {
 #endif
 }
 
-size_t Numa::GetCoreReservationId() {
+size_t Numa::GetCoreReservationCounter() {
 #if HAVE_LIBHWLOC
   auto config = Config::Lock();
   return config->core_reservation_id_;

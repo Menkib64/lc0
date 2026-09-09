@@ -398,7 +398,7 @@ class DemuxingBackend final : public Backend {
         1, backend_options.GetOrDefault<int>("shared_backend_threads", 1));
     minimum_batch_step_ =
         backend_options.GetOrDefault<int>("min_batch_step", 1);
-    core_reservation_id_ = Numa::GetCoreReservationId();
+    core_reservation_counter_ = Numa::GetCoreReservationCounter();
     UpdateConfiguration(options);
     const auto parents = backend_options.ListSubdicts();
     std::vector<DemuxingChildBackend::AssignFuture> capabilities;
@@ -547,10 +547,11 @@ class DemuxingBackend final : public Backend {
         options.Get<std::string>(SharedBackendParams::kWeightsId)) {
       return NEED_RESTART;
     }
-    if (core_reservation_id_ != Numa::GetCoreReservationId()) {
+    if (core_reservation_counter_ != Numa::GetCoreReservationCounter()) {
       for (auto& b : backends_) {
         b.UpdateThreadBind();
       }
+      core_reservation_counter_ = Numa::GetCoreReservationCounter();
     }
     softmax_policy_temperature_ =
         1.0f / options.Get<float>(SharedBackendParams::kPolicySoftmaxTemp);
@@ -563,7 +564,7 @@ class DemuxingBackend final : public Backend {
   std::vector<DemuxingChildBackend> backends_;
   BackendAttributes attrs_;
   pblczero::NetworkFormat::InputFormat input_format_;
-  size_t core_reservation_id_ = 0;
+  size_t core_reservation_counter_ = 0;
   float softmax_policy_temperature_;
   FillEmptyHistory fill_empty_history_;
   int minimum_batch_step_ = 1;
