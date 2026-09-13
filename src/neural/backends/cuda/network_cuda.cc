@@ -1419,7 +1419,6 @@ std::unique_ptr<Network> MakeCudaNetworkAuto(
     const std::optional<WeightsFile>& weights, const OptionsDict& options) {
   int gpu_id = options.GetOrDefault<int>("gpu", 0);
   cudaDeviceProp deviceProp = {};
-  // No error checking here, this will be repeated later.
   ReportCUDAErrors(cudaGetDeviceProperties(&deviceProp, gpu_id));
 
   // Check if the GPU supports FP16.
