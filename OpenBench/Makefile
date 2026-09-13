@@ -2,7 +2,8 @@ ifndef EXE
 	EXE = $(CURDIR)/lc0
 endif
 
-BUILD_FLAGS =
+BUILD_FLAGS = --buildtype=debugoptimized -Dcpp_args="-march=native"
+BUILD_FLAGS += -Db_sanitize=thread -Dforce_fallback_for=absl_flat_hash_map
 ifdef EVALFILE
 	BUILD_FLAGS += -Dembed=true
 endif
