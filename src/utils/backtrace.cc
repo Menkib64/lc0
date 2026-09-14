@@ -73,7 +73,16 @@ class BacktraceSignalHandler {
     static constexpr BacktracePointers kEndThreadSignal{};
 
    public:
-    BacktracePrinterThread() : thread_(&BacktracePrinterThread::Run, this) {}
+    BacktracePrinterThread() : thread_(&BacktracePrinterThread::Run, this) {
+      struct sigevent sev;
+      sev.sigev_notify = SIGEV_SIGNAL;
+      sev.sigev_signo = SIGUSR1;
+      sev.sigev_value.sival_ptr = nullptr;
+      if (timer_create(CLOCK_MONOTONIC, &sev, &timer_id_) != 0) {
+        throw Exception("Failed to create timer for debug backtraces: " +
+                        std::make_error_code(std::errc(errno)).message());
+      }
+    }
 
     ~BacktracePrinterThread() {
       backtrace_pointers_ptr_.store(&kEndThreadSignal,
@@ -143,11 +152,22 @@ class BacktraceSignalHandler {
             }
           }
         }
-        abort();
+        // Use timer for a delayed crash to allow backtrace from all slow
+        // threads.
+        struct itimerspec its;
+        its.it_value.tv_sec = 0;
+        its.it_value.tv_nsec = 200'000'000;  // 200ms
+        its.it_interval.tv_sec = 0;
+        its.it_interval.tv_nsec = 0;
+        if (timer_settime(timer_id_, 0, &its, nullptr) == -1) {
+          throw Exception("Failed to start timer for debug backtraces: " +
+                          std::make_error_code(std::errc(errno)).message());
+        }
       }
     }
 
     std::thread thread_;
+    timer_t timer_id_;
   };
 
   static BacktracePrinterThread backtrace_printer_thread_;
@@ -156,6 +176,9 @@ class BacktraceSignalHandler {
     // Print the backtrace to stderr.
     TimerBacktrace* timer_backtrace =
         reinterpret_cast<TimerBacktrace*>(info->si_value.sival_ptr);
+    if (timer_backtrace == nullptr) {
+      abort();
+    }
     {
       auto message = timer_backtrace->GetMessage();
       write(STDERR_FILENO, message.data(), message.size());
@@ -228,9 +251,7 @@ TimerBacktrace::TimerBacktrace(uint64_t delay_ns, std::string_view message)
   }
 }
 
-TimerBacktrace::~TimerBacktrace() {
-  timer_delete(timer_id_);
-}
+TimerBacktrace::~TimerBacktrace() { timer_delete(timer_id_); }
 
 void TimerBacktrace::Start() {
   struct itimerspec its;

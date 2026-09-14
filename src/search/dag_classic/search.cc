@@ -2039,7 +2039,7 @@ SearchWorker::SearchWorker(int tid, SearchWorkerCachedState& state,
       moves_left_support_(search_->backend_attributes_.has_mlh),
       cancel_task_(*this),
       output_task_{*this},
-      timer_backtrace_{60'000'000, "SearchWorker iteration watchdog.\n"} {
+      timer_backtrace_{100'000'000, "SearchWorker iteration watchdog.\n"} {
   int total_workers =
       search_->state_.task_queue_.Size() + search_->total_workers_;
   iteration_memory_managers_.resize(total_workers);
