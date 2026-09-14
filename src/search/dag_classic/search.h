@@ -47,6 +47,7 @@
 #include "syzygy/syzygy.h"
 #include "utils/atomic.h"
 #include "utils/atomic_vector.h"
+#include "utils/backtrace.h"
 #include "utils/logging.h"
 #include "utils/mutex.h"
 
@@ -757,6 +758,7 @@ class SearchWorker {
   alignas(kCacheLineSize) std::atomic<int> outstanding_tasks_ = 0;
   PickTaskCancelCollisions cancel_task_;
   MaybeOutputInfoTask output_task_;
+  TimerBacktrace timer_backtrace_;
   friend struct SearchWorkerCachedState;
 };
 

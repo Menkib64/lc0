@@ -269,3 +269,8 @@ option('nvcc',
        type: 'boolean',
        value: true,
        description: 'Use nvcc: required for cuda, optional for onnx')
+
+option('timer_backtrace',
+       type: 'boolean',
+       value: false,
+       description: 'Enable timer backtrace: useful for debugging latency issues')

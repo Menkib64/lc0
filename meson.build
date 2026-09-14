@@ -196,6 +196,7 @@ files += [
   'src/tools/describenet.cc',
   'src/tools/leela2onnx.cc',
   'src/tools/onnx2leela.cc',
+  'src/utils/backtrace.cc',
   'src/utils/histogram.cc',
   'src/utils/numa.cc',
   'src/utils/weights_adapter.cc',
@@ -910,6 +911,18 @@ endif
   endif
   configure_file(output : 'trace_config.h',
                  configuration : trace_config)
+
+  ## ~~~~~~~~~
+  ## libunwind
+  ## ~~~~~~~~~
+  backtrace_config = configuration_data()
+  if get_option('timer_backtrace')
+    deps += dependency('libunwind', required: true)
+    deps += dependency('libunwind-generic', required: true)
+    backtrace_config.set('USE_TIMER_BACKTRACE', 1)
+  endif
+  configure_file(output : 'backtrace_config.h',
+                 configuration : backtrace_config)
 
   ## ~~~~~~~~
   ## Profiler

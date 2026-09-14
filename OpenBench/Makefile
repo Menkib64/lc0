@@ -2,7 +2,7 @@ ifndef EXE
 	EXE = $(CURDIR)/lc0
 endif
 
-BUILD_FLAGS =
+BUILD_FLAGS = --buildtype=debugoptimized -Dtimer_backtrace=true
 ifdef EVALFILE
 	BUILD_FLAGS += -Dembed=true
 endif
