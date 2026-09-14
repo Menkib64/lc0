@@ -97,9 +97,9 @@ class BacktraceSignalHandler {
           continue;
         }
         BacktracePointers backtrace{*backtrace_pointers};
-        fprintf(stderr, "Backtrace (depth %d):\n", backtrace_pointers->size);
         backtrace_pointers_ptr_.compare_exchange_strong(
             backtrace_pointers, nullptr, std::memory_order_release);
+        CERR << "Backtrace (depth " << backtrace.size << "):";
         // Print the backtrace to stderr.
         for (int i = 0; i < backtrace.size; ++i) {
           unw_word_t ip = backtrace.pointers[i];
@@ -108,14 +108,14 @@ class BacktraceSignalHandler {
 
           Dl_info info;
           if (dladdr(reinterpret_cast<void*>(ip), &info) == 0) {
-            fprintf(stderr, "  #%d %lx: <unmapped>\n", i, ip);
+            CERR << "  #" << i << " " << std::hex << ip << ": <unmapped>";
             continue;
           } else if (info.dli_fname != nullptr && info.dli_sname != nullptr) {
-            fprintf(stderr, "  #%d %lx: %s + 0x%lx (%s + 0x%lx)\n", i, ip,
-                    info.dli_sname,
-                    ip - reinterpret_cast<uintptr_t>(info.dli_saddr),
-                    info.dli_fname,
-                    ip - reinterpret_cast<uintptr_t>(info.dli_fbase));
+            CERR << "  #" << i << " " << std::hex << ip << ": "
+                 << info.dli_sname << " + 0x" << std::hex
+                 << (ip - reinterpret_cast<uintptr_t>(info.dli_saddr)) << " ("
+                 << info.dli_fname << " + 0x" << std::hex
+                 << (ip - reinterpret_cast<uintptr_t>(info.dli_fbase)) << ")";
             continue;
           }
 
@@ -125,20 +125,21 @@ class BacktraceSignalHandler {
 
           if (rv == 0) {
             if (info.dli_fname != nullptr) {
-              fprintf(stderr, "  #%d %lx: %s (%s + 0x%lx)\n", i, ip,
-                      symbols.data(), info.dli_fname,
-                      ip - reinterpret_cast<uintptr_t>(info.dli_fbase));
+              CERR << "  #" << i << " " << std::hex << ip << ": "
+                   << symbols.data() << " (" << info.dli_fname << " + 0x"
+                   << std::hex
+                   << (ip - reinterpret_cast<uintptr_t>(info.dli_fbase)) << ")";
             } else {
-              fprintf(stderr, "  #%d %lx: %s + 0x%lx\n", i, ip, symbols.data(),
-                      offset);
+              CERR << "  #" << i << " " << std::hex << ip << ": "
+                   << symbols.data() << " + 0x" << std::hex << offset;
             }
           } else {
             if (info.dli_fname != nullptr) {
-              fprintf(stderr, "  #%d %lx: <unknown> (%s + 0x%lx)\n", i, ip,
-                      info.dli_fname,
-                      ip - reinterpret_cast<uintptr_t>(info.dli_fbase));
+              CERR << "  #" << i << " " << std::hex << ip << ": <unknown> ("
+                   << info.dli_fname << " + 0x" << std::hex
+                   << (ip - reinterpret_cast<uintptr_t>(info.dli_fbase)) << ")";
             } else {
-              fprintf(stderr, "  #%d %lx: <unknown>\n", i, ip);
+              CERR << "  #" << i << " " << std::hex << ip << ": <unknown>";
             }
           }
         }
