@@ -197,6 +197,7 @@ class BacktraceSignalHandler {
 
     size_t depth = 0;
     int err = 0;
+    backtrace_pointers_.pointers[depth++] = first_ip;
     while ((err = unw_step(&cursor)) > 0 &&
            depth < backtrace_pointers_.pointers.size()) {
       unw_word_t ip;
@@ -208,9 +209,6 @@ class BacktraceSignalHandler {
       backtrace_pointers_.pointers[depth++] = static_cast<uintptr_t>(ip);
     }
 
-    if (depth == 0) {
-      backtrace_pointers_.pointers[depth++] = first_ip;
-    }
     backtrace_pointers_.size = depth;
     std::array<char, 128> message;
     int len = snprintf(message.data(), message.size(),
