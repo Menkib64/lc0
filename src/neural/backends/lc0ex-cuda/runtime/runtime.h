@@ -27,19 +27,49 @@
 
 #pragma once
 
-#include <cstddef>
+#include <absl/container/inlined_vector.h>
+
 #include <cstdint>
-#include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#if __cpp_lib_source_location >= 201907L
+#include <source_location>
+#endif
+
 #include "proto/lc0ex.pb.h"
 
-namespace lczero {
-namespace lc0ex {
+namespace lczero::lc0ex {
+
+// How an Execution issues its kernel launch loop.
+//   kOff    - a plain launch loop, one cuLaunchKernel per node.
+//   kDag    - upstream's behaviour: a CUDA graph whose edges are the node
+//             dependencies, so independent kernels may run concurrently.
+//   kLinear - stream capture of the plain launch loop into a linear graph:
+//             the launch-overhead saving without the cross-kernel concurrency.
+// R22 measured kDag at +25 % with one execution slot in flight and -9 % with
+// two, so the choice has to be made by the caller, not baked in.
+enum class GraphMode { kOff, kDag, kLinear };
+
+
+// A computation per thread computation state which will be passed to an
+// executable when running or capturing a graph.
+template <typename R, typename C>
+struct ComputationState {
+  typename R::Stream stream_;
+  typename R::Memory device_memory_;
+  typename R::template HostBuffer<uint64_t> input_mask;
+  typename R::template HostBuffer<C> input_value;
+  typename R::template HostBuffer<C> output_policy;
+  typename R::template HostBuffer<C> output_wdl;
+  typename R::template HostBuffer<C> output_mlh;
+  typename R::Event sleep_event_;
+  typename R::Event wdl_download_done_;
+  typename R::Event mlh_download_done_;
+  typename R::Event policy_download_done_;
+};
 
 // Handles and descriptor references returned by an Executable remain valid
 // until that Executable is destroyed. An Execution and its buffers must not
@@ -51,131 +81,141 @@ struct TargetInfo {
 };
 
 struct BufferInfo {
-  std::string name;
+  struct ShapeAndStride {
+    std::uint64_t shape = 0;
+    std::int64_t stride = 0;
+  };
   pblczero::Buffer::DataType data_type = pblczero::Buffer::DATA_TYPE_UNKNOWN;
-  std::vector<std::uint64_t> shape;
-  std::vector<std::int64_t> strides;
-  std::uint64_t size_bytes = 0;
-  std::uint64_t offset_bytes = 0;
+  absl::InlinedVector<ShapeAndStride, 2> shape;
+  size_t size_bytes = 0;
+  ptrdiff_t offset_bytes = 0;
 };
 
-struct ParameterInfo {
-  std::string name;
-  pblczero::ParameterType type = pblczero::ParameterType_PARAMETER_TYPE_UNKNOWN;
+struct AllocationInfo {
+  size_t size_bytes_ = 0;
+  size_t alignment_bytes_ = 0;
 };
 
-struct ProgramInfo {
-  std::string name;
-  std::string metadata;
-};
-
-class Buffer {
+class MemoryBase {
  public:
-  virtual ~Buffer() = default;
+  MemoryBase() = default;
+  MemoryBase(size_t size, size_t alignment)
+      : size_(size), alignment_(alignment) {}
+  ~MemoryBase() = default;
 
-  virtual const BufferInfo& GetInfo() const = 0;
-  // Host copies complete before returning, and therefore accept ordinary
-  // pageable host memory. If size_bytes is specified, only that prefix is
-  // copied.
-  virtual void CopyFromHost(
-      std::span<const std::byte> source,
-      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
-  virtual void CopyToHost(
-      std::span<std::byte> destination,
-      std::optional<std::size_t> size_bytes = std::nullopt) const = 0;
+  MemoryBase(const MemoryBase&) = delete;
+  MemoryBase& operator=(const MemoryBase&) = delete;
+  MemoryBase(MemoryBase&& other) noexcept
+      : aligned_ptr_(other.aligned_ptr_),
+        size_(other.size_),
+        alignment_(other.alignment_) {
+    other.aligned_ptr_ = nullptr;
+    other.size_ = 0;
+    other.alignment_ = 0;
+  }
+  MemoryBase& operator=(MemoryBase&& other) noexcept {
+    if (this != &other) {
+      aligned_ptr_ = other.aligned_ptr_;
+      size_ = other.size_;
+      alignment_ = other.alignment_;
+      other.aligned_ptr_ = nullptr;
+      other.size_ = 0;
+      other.alignment_ = 0;
+    }
+    return *this;
+  }
+  
+  void IsValidRange(
+      std::string_view name, ptrdiff_t offset, size_t size
+#if __cpp_lib_source_location >= 201907L
+      ,
+      const std::source_location& location = std::source_location::current()
+#endif
+  ) const;
 
-  // Asynchronous variants. The copy is issued on the execution's stream and is
-  // only complete once Execution::Synchronize() returns; until then the caller
-  // must not touch `source`, and `destination` holds no valid data. Pageable
-  // host memory is accepted: the implementation stages through pinned memory it
-  // owns, which is what allows the copy to overlap another slot's kernels.
-  virtual void CopyFromHostAsync(
-      std::span<const std::byte> source,
-      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
-  virtual void CopyToHostAsync(
-      std::span<std::byte> destination,
-      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
+  explicit operator bool() const { return aligned_ptr_ != nullptr; }
+
+  template <typename T>
+  std::span<T> AsSpan(ptrdiff_t offset, size_t size) const noexcept {
+    assert(size % sizeof(T) == 0);
+    assert(IsValidRange(offset, size));
+    return {reinterpret_cast<T*>(aligned_ptr_ + offset), size / sizeof(T)};
+  }
+
+  std::byte* Data() noexcept {
+    return reinterpret_cast<std::byte*>(aligned_ptr_);
+  }
+
+  const std::byte* Data() const noexcept {
+    return reinterpret_cast<const std::byte*>(aligned_ptr_);
+  }
+
+  size_t Size() const noexcept { return size_; }
+  size_t Alignment() const noexcept { return alignment_; }
+
+ protected:
+  bool IsValidRange(ptrdiff_t offset, size_t size) const noexcept {
+    return offset >= 0 && static_cast<size_t>(offset) + size <= size_;
+  }
+  char* aligned_ptr_ = nullptr;
+  size_t size_ = 0;
+  size_t alignment_ = 0;
 };
 
-class Parameter {
+template <typename T, typename MemoryType>
+class BufferBase : public std::span<T> {
+  using Base = std::span<T>;
+
+  Base Init(std::string_view name, MemoryType& memory, ptrdiff_t offset,
+            size_t size) {
+    memory->IsValidRange(name, offset, size);
+    return memory->AsSpan(T{}, offset, size);
+  }
+
  public:
-  virtual ~Parameter() = default;
-
-  virtual const ParameterInfo& GetInfo() const = 0;
-  virtual bool IsSet() const = 0;
-  virtual void Set(std::uint32_t value) = 0;
-  virtual void Set(const Buffer& buffer) = 0;
-  virtual void Reset() = 0;
+  BufferBase() = default;
+  BufferBase(std::string_view name, MemoryType& memory, ptrdiff_t offset,
+             size_t size)
+      : Base(Init(name, memory, offset, size)) {}
+  BufferBase(const std::span<T>& span) : Base(span) {}
 };
 
-class Program {
+enum class StreamFlags : int {
+  DEFAULT = 0,
+};
+
+enum class EventFlags : int {
+  DEFAULT = 0,
+  BLOCKING = 1 << 0,
+  USE_TIMING = 1 << 1,
+};
+
+inline EventFlags operator&(EventFlags lhs, EventFlags rhs) {
+  return static_cast<EventFlags>(static_cast<int>(lhs) & static_cast<int>(rhs));
+}
+
+inline EventFlags operator|(EventFlags lhs, EventFlags rhs) {
+  return static_cast<EventFlags>(static_cast<int>(lhs) | static_cast<int>(rhs));
+}
+
+inline EventFlags operator~(EventFlags flag) {
+  return static_cast<EventFlags>(~static_cast<int>(flag));
+}
+
+class NodeBase {
  public:
-  virtual ~Program() = default;
+  NodeBase(const pblczero::Node& node);
+  ~NodeBase() = default;
 
-  virtual const ProgramInfo& GetInfo() const = 0;
-  virtual std::span<const BufferInfo> GetBuffers() const = 0;
-  virtual const BufferInfo* FindBuffer(std::string_view name) const = 0;
-  virtual std::span<const ParameterInfo> GetParameters() const = 0;
+  std::span<const uint32_t> GetDependecies() const noexcept {
+    return {dependencies_.data(), dependencies_.size()};
+  }
+
+  int GetPriority() const noexcept { return priority_; }
+
+ protected:
+  absl::InlinedVector<uint32_t, 4> dependencies_;
+  int priority_ = 0;
 };
 
-// A reusable instance of one Program. It exclusively leases a stream and an
-// execution allocation until it is destroyed. The allocation may be larger
-// than this Program's requirements and may be reused by another Execution.
-// Run() submits asynchronously; the Execution may be modified or run again
-// only after Synchronize().
-class Execution {
- public:
-  virtual ~Execution() = default;
-
-  // Only buffers belonging to this Execution's Program are available.
-  virtual Buffer& GetBuffer(const BufferInfo& info) = 0;
-  virtual Parameter& GetParameter(std::string_view name) = 0;
-  virtual void ResetParameters() = 0;
-  virtual void Run() = 0;
-  virtual void Synchronize() = 0;
-};
-
-class Executable {
- public:
-  virtual ~Executable() = default;
-
-  virtual const TargetInfo& GetTarget() const = 0;
-  virtual std::string_view GetMetadata() const = 0;
-  // Only persistent buffers are available through an Executable.
-  virtual std::span<const BufferInfo> GetBuffers() const = 0;
-  virtual std::span<const ParameterInfo> GetParameters() const = 0;
-  virtual std::span<const ProgramInfo> GetPrograms() const = 0;
-
-  virtual const BufferInfo* FindBuffer(std::string_view name) const = 0;
-  virtual const ParameterInfo* FindParameter(std::string_view name) const = 0;
-  virtual const Program* FindProgram(std::string_view name) const = 0;
-
-  virtual std::size_t GetPersistentAllocationSize() const = 0;
-  virtual void CopyPersistentFromHost(
-      std::span<const std::byte> source,
-      std::optional<std::size_t> size_bytes = std::nullopt) = 0;
-
-  // Persistent storage is shared by all Executions; callers must not modify it
-  // while an Execution that may access it is in flight.
-  virtual Buffer& GetBuffer(const BufferInfo& info) = 0;
-
-  // Creates an execution that reuses `sibling`'s device execution slot and
-  // stream. Only one of the executions sharing a slot may be in flight at a
-  // time; the caller guarantees that. Passing nullptr allocates a fresh slot.
-  virtual std::unique_ptr<Execution> CreateExecution(const Program& program,
-                                                     Execution* sibling) = 0;
-
-  virtual std::unique_ptr<Execution> CreateExecution(
-      const Program& program) = 0;
-};
-
-class Runtime {
- public:
-  virtual ~Runtime() = default;
-
-  virtual std::unique_ptr<Executable> Load(
-      const pblczero::NeuralExecutable& executable) = 0;
-};
-
-}  // namespace lc0ex
-}  // namespace lczero
+}  // namespace lczero::lc0ex

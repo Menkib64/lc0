@@ -74,9 +74,12 @@ class CAPABILITY("mutex") Mutex {
   // std::unique_lock<std::mutex> wrapper.
   class SCOPED_CAPABILITY Lock {
    public:
+    Lock() = default;
     Lock(Mutex& m) ACQUIRE(m) : lock_(m.get_raw()) {}
     ~Lock() RELEASE() {}
     std::unique_lock<std::mutex>& get_raw() { return lock_; }
+
+    void unlock() RELEASE() { lock_.unlock(); }
 
    private:
     std::unique_lock<std::mutex> lock_;

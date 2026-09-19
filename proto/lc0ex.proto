@@ -76,6 +76,12 @@ message NeuralExecutable {
 
   // Named persistent buffers. Execution buffers are listed by their Program.
   repeated Buffer buffers = 13;
+
+  // Shared execution allocation for all programs.
+  optional Allocation execution_allocation = 17;
+
+  // Datatype used for inputs and outputs.
+  optional Buffer.DataType io_data_type = 18;
 }
 
 // An embedded binary module. A binary may contain any number of exported symbols.
@@ -150,7 +156,7 @@ message Kernel {
 message Program {
   required string name = 1;
   optional bytes metadata = 2;
-  optional Allocation execution_allocation = 3;
+  optional Allocation execution_allocation = 3; // [deprecated = true];
   repeated Buffer buffers = 4;
   repeated Node nodes = 5;
 }
@@ -181,7 +187,12 @@ message Node {
     optional Symbol symbol = 3;
   }
 
-  required uint32 kernel_idx = 1;
+  message Memcpy {
+    optional string name = 1;
+    optional int64 gpu_offset = 2;
+  }
+
+  optional uint32 kernel_idx = 1;
 
   // Indices of nodes in this Program that must complete before this node starts.
   repeated uint32 dependencies = 2;
@@ -197,5 +208,17 @@ message Node {
   repeated uint32 block = 5;
 
   // Dynamic shared memory requested for this launch.
-  required uint32 dynamic_shared_memory_bytes = 6;
+  optional uint32 dynamic_shared_memory_bytes = 6;
+
+  // Kernel priority.
+  optional int32 priority = 7;
+
+  // Record an external cuda event for synchronization.
+  optional string record_event = 8;
+
+  // Wait for an external cuda event before continuing.
+  optional string wait_event = 9;
+
+  // Memcpy node for DMA transfers.
+  optional Memcpy memcpy = 10;
 }

@@ -25,17 +25,20 @@
   Program grant you additional permission to convey the resulting work.
 */
 
+#include <absl/container/inlined_vector.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
+#include <future>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <map>
-#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,29 +51,26 @@
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "network_fingerprint.h"
 #include "neural/backend.h"
+#include "neural/backends/lc0ex-cuda/runtime/runtime.h"
 #include "neural/encoder.h"
 #include "neural/loader.h"
 #include "neural/onnx/converter.h"
 #include "neural/register.h"
 #include "neural/shared_params.h"
-#include "network_fingerprint.h"
-#include "proto/lc0ex_metadata.pb.h"
+#include "proto/lc0ex.pb.h"
 #include "runtime/lc0ex_cuda.h"
 #include "utils/atomic_vector.h"
 #include "utils/exception.h"
 #include "utils/fastmath.h"
 #include "utils/logging.h"
+#include "utils/trace.h"
 
 namespace lczero {
 namespace {
 
 constexpr std::string_view kBackendName = "lc0ex-cuda";
-constexpr std::string_view kInputMasksName = "/input/plane_masks";
-constexpr std::string_view kInputValuesName = "/input/plane_values";
-constexpr std::string_view kOutputPolicyName = "/output/policy";
-constexpr std::string_view kOutputWdlName = "/output/wdl";
-constexpr std::string_view kOutputMlhName = "/output/mlh";
 constexpr std::size_t kNumOutputPolicy = 1858;
 constexpr std::size_t kNumWdlOutputs = 3;
 
@@ -98,57 +98,8 @@ std::uint64_t DataTypeSize(pblczero::Buffer::DataType data_type) {
   }
 }
 
-const lc0ex::BufferInfo* RequireProgramBuffer(
-    const lc0ex::Program& program, std::string_view name,
-    pblczero::Buffer::DataType data_type,
-    std::initializer_list<std::uint64_t> shape) {
-  const auto* buffer = program.FindBuffer(name);
-  if (!buffer) {
-    throw Exception("The lc0ex program '" + program.GetInfo().name +
-                    "' has no buffer '" + std::string(name) + "'.");
-  }
-  if (buffer->data_type != data_type) {
-    throw Exception("Data type mismatch for lc0ex program buffer '" +
-                    std::string(name) + "'.");
-  }
-  if (buffer->shape.size() != shape.size()) {
-    throw Exception("Shape mismatch for lc0ex program buffer '" +
-                    std::string(name) + "'.");
-  }
-
-  std::uint64_t expected_size = DataTypeSize(data_type);
-  std::size_t dimension_index = 0;
-  for (const std::uint64_t dimension : shape) {
-    if (buffer->shape[dimension_index++] != dimension) {
-      throw Exception("Shape mismatch for lc0ex program buffer '" +
-                      std::string(name) + "'.");
-    }
-    if (dimension != 0 &&
-        expected_size > std::numeric_limits<std::uint64_t>::max() /
-                            dimension) {
-      throw Exception("Size overflow for lc0ex program buffer '" +
-                      std::string(name) + "'.");
-    }
-    expected_size *= dimension;
-  }
-  if (buffer->size_bytes != expected_size) {
-    throw Exception("Size mismatch for lc0ex program buffer '" +
-                    std::string(name) + "'.");
-  }
-  return buffer;
-}
-
-struct ProgramSpec {
-  std::size_t batch_size;
-  const lc0ex::Program* program;
-  const lc0ex::BufferInfo* input_masks;
-  const lc0ex::BufferInfo* input_values;
-  const lc0ex::BufferInfo* output_policy;
-  const lc0ex::BufferInfo* output_wdl;
-  const lc0ex::BufferInfo* output_mlh;
-};
-
 pblczero::NeuralExecutable LoadExecutableFile(const std::string& path) {
+  LCTRACE_FUNCTION_SCOPE;
   std::ifstream file(path, std::ios::in | std::ios::binary);
   if (!file) {
     throw Exception("Cannot read lc0ex executable from " + path + ".");
@@ -157,8 +108,7 @@ pblczero::NeuralExecutable LoadExecutableFile(const std::string& path) {
   std::string serialized((std::istreambuf_iterator<char>(file)),
                          std::istreambuf_iterator<char>());
   if (file.bad()) {
-    throw Exception("Error while reading lc0ex executable from " + path +
-                    ".");
+    throw Exception("Error while reading lc0ex executable from " + path + ".");
   }
 
   pblczero::NeuralExecutable executable;
@@ -168,6 +118,7 @@ pblczero::NeuralExecutable LoadExecutableFile(const std::string& path) {
 
 void CheckNetworkFingerprint(const WeightsFile& weights,
                              const pblczero::NeuralExecutable& executable) {
+  LCTRACE_FUNCTION_SCOPE;
   pblczero::Net executable_fingerprint;
   executable_fingerprint.ParseFromString(executable.metadata());
 
@@ -175,40 +126,45 @@ void CheckNetworkFingerprint(const WeightsFile& weights,
   if (network_fingerprint.OutputAsString() !=
       executable_fingerprint.OutputAsString()) {
     throw Exception(
-        "The lc0ex executable was created for a different network architecture.");
+        "The lc0ex executable was created for a different network "
+        "architecture.");
   }
 }
 
-bool HasMatchingShape(const lc0ex::BufferInfo& buffer,
+bool HasMatchingShape(const pblczero::Buffer& buffer,
                       const pblczero::TensorProto& initializer) {
-  if (initializer.dims_size() != buffer.shape.size()) {
+  if (initializer.dims_size() != buffer.shape().size()) {
     return false;
   }
   for (std::size_t i = 0; i < initializer.dims_size(); ++i) {
     const auto dimension = initializer.dims(i);
     if (dimension < 0 ||
-        static_cast<std::uint64_t>(dimension) != buffer.shape[i]) {
+        static_cast<std::uint64_t>(dimension) != buffer.shape()[i]) {
       return false;
     }
   }
   return true;
 }
 
-void ValidateInitializer(const lc0ex::BufferInfo& buffer,
+void ValidateInitializer(const pblczero::Buffer& buffer,
                          const pblczero::TensorProto& initializer) {
-  if (static_cast<int>(buffer.data_type) !=
+  if (static_cast<int>(buffer.data_type()) !=
       static_cast<int>(initializer.data_type())) {
-    throw Exception("Data type mismatch for lc0ex buffer '" + buffer.name +
-                    "'.");
+    throw Exception("Data type mismatch for lc0ex buffer '" +
+                    std::string(buffer.name()) + "'.");
   }
   if (!HasMatchingShape(buffer, initializer)) {
-    throw Exception("Shape mismatch for lc0ex buffer '" + buffer.name +
-                    "'.");
+    throw Exception("Shape mismatch for lc0ex buffer '" +
+                    std::string(buffer.name()) + "'.");
   }
+  size_t buffer_size =
+      std::accumulate(buffer.shape().begin(), buffer.shape().end(), 1ull,
+                      std::multiplies<std::uint64_t>()) *
+      DataTypeSize(buffer.data_type());
   if (static_cast<std::uint64_t>(initializer.raw_data().size()) !=
-      buffer.size_bytes) {
-    throw Exception("Size mismatch for lc0ex buffer '" + buffer.name +
-                    "'.");
+      buffer_size) {
+    throw Exception("Size mismatch for lc0ex buffer '" +
+                    std::string(buffer.name()) + "'.");
   }
 }
 
@@ -241,13 +197,11 @@ WeightsToOnnxConverterOptions MakeConverterOptions(
   return converter_options;
 }
 
-void CopyStridedHostTensor(
-    const std::vector<std::uint64_t>& shape,
-    const std::vector<std::int64_t>& dst_strides,
-    const std::vector<std::int64_t>& src_strides,
-    std::size_t elem_size,
-    const std::byte* src,
-    std::byte* dst) {
+void CopyStridedHostTensor(const std::vector<std::uint64_t>& shape,
+                           const std::vector<std::int64_t>& dst_strides,
+                           const std::vector<std::int64_t>& src_strides,
+                           std::size_t elem_size, const std::byte* src,
+                           std::byte* dst) {
   if (shape.empty()) {
     std::memcpy(dst, src, elem_size);
     return;
@@ -264,12 +218,10 @@ void CopyStridedHostTensor(
         break;
       }
     } else {
-      if (dst_strides[dim] ==
-              dst_strides[dim + 1] *
-                  static_cast<std::int64_t>(shape[dim + 1]) &&
-          src_strides[dim] ==
-              src_strides[dim + 1] *
-                  static_cast<std::int64_t>(shape[dim + 1])) {
+      if (dst_strides[dim] == dst_strides[dim + 1] *
+                                  static_cast<std::int64_t>(shape[dim + 1]) &&
+          src_strides[dim] == src_strides[dim + 1] *
+                                  static_cast<std::int64_t>(shape[dim + 1])) {
         contiguous_bytes *= shape[dim];
         contiguous_dim = dim;
       } else {
@@ -302,44 +254,64 @@ std::vector<std::int64_t> DefaultStrides(
   return strides;
 }
 
-void CopyTensorToHostStaging(const lc0ex::BufferInfo& buffer,
+std::vector<std::int64_t> GetStride(const pblczero::Buffer& buffer) {
+  if (buffer.has_layout()) {
+    return {buffer.layout().strides()};
+  }
+  return DefaultStrides(buffer.shape());
+}
+
+void CopyTensorToHostStaging(const pblczero::Buffer& buffer,
                              std::span<const std::byte> source,
                              std::span<std::byte> destination_staging) {
-  const auto elem_size = DataTypeSize(buffer.data_type);
-  const auto src_strides = DefaultStrides(buffer.shape);
+  const auto elem_size = DataTypeSize(buffer.data_type());
+  const auto src_strides = DefaultStrides(buffer.shape());
 
-  if (buffer.offset_bytes >= destination_staging.size()) {
-    throw Exception("Buffer '" + buffer.name +
+  if (buffer.offset() >= destination_staging.size()) {
+    throw Exception("Buffer '" + std::string(buffer.name()) +
                     "' offset exceeds persistent allocation bounds.");
   }
 
-  CopyStridedHostTensor(
-      buffer.shape, buffer.strides, src_strides, elem_size,
-      source.data(), destination_staging.data() + buffer.offset_bytes);
+  CopyStridedHostTensor(buffer.shape(), GetStride(buffer), src_strides,
+                        elem_size, source.data(),
+                        destination_staging.data() + buffer.offset());
 }
 
-void UploadWeights(const WeightsFile& weights, lc0ex::Executable& executable,
+template <typename BackendType, typename ExecutableType>
+void UploadWeights(BackendType& backend, const WeightsFile& weights,
+                   ExecutableType& executable,
+                   const pblczero::NeuralExecutable& executable_proto,
                    const OptionsDict& backend_options) {
+  LCTRACE_FUNCTION_SCOPE;
   std::optional<WeightsFile> converted_weights;
   if (!weights.has_onnx_model()) {
     CERR << "Converting weights to ONNX first.";
+    CERR << "HINT: Loading can be made faster using leela2onnx and onnx2leela "
+            "commands. You can decompress the resulting file for a little "
+            "faster loading.";
+    CheckNetworkFingerprint(weights, executable_proto);
     converted_weights =
         ConvertWeightsToOnnx(weights, MakeConverterOptions(backend_options));
   }
 
   const auto& onnx_weights = converted_weights ? *converted_weights : weights;
 
+  backend.InitializeBackendAttributes(onnx_weights);
+
   pblczero::ModelProto onnx;
   onnx.ParseFromString(onnx_weights.onnx_model().model());
 
-  std::unordered_map<std::string, const pblczero::TensorProto*>
+  std::unordered_map<std::string_view, std::tuple<const pblczero::TensorProto*,
+                                                  const pblczero::Buffer*>>
       initializers_by_name;
   initializers_by_name.reserve(onnx.graph().initializer_size());
   std::string duplicate_initializer;
-  const bool unique_initializers = absl::c_all_of(
-      onnx.graph().initializer(), [&](const auto& initializer) {
-        const auto name = std::string(initializer.name());
-        if (!initializers_by_name.emplace(name, &initializer).second) {
+  const bool unique_initializers =
+      absl::c_all_of(onnx.graph().initializer(), [&](const auto& initializer) {
+        const auto name = initializer.name();
+        decltype(initializers_by_name)::value_type::second_type value(
+            &initializer, nullptr);
+        if (!initializers_by_name.emplace(name, value).second) {
           duplicate_initializer = name;
           return false;
         }
@@ -350,16 +322,17 @@ void UploadWeights(const WeightsFile& weights, lc0ex::Executable& executable,
                     duplicate_initializer + "'.");
   }
 
-  std::string missing_buffer;
-  if (absl::c_any_of(executable.GetBuffers(), [&](const auto& buffer) {
-        if (initializers_by_name.find(buffer.name) ==
-            initializers_by_name.end()) {
-          missing_buffer = buffer.name;
+  std::string_view missing_buffer;
+  if (absl::c_any_of(executable_proto.buffers(), [&](const auto& buffer) {
+        auto iter = initializers_by_name.find(buffer.name());
+        if (iter == initializers_by_name.end()) {
+          missing_buffer = buffer.name();
           return true;
         }
+        std::get<1>(iter->second) = &buffer;
         return false;
       })) {
-    throw Exception("The lc0ex buffer '" + missing_buffer +
+    throw Exception("The lc0ex buffer '" + std::string(missing_buffer) +
                     "' has no corresponding ONNX initializer.");
   }
 
@@ -368,29 +341,27 @@ void UploadWeights(const WeightsFile& weights, lc0ex::Executable& executable,
                                  std::byte{0});
 
   for (const auto& initializer : onnx.graph().initializer()) {
-    const auto* buffer = executable.FindBuffer(initializer.name());
-    if (!buffer) {
+    auto iter = initializers_by_name.find(initializer.name());
+    if (iter == initializers_by_name.end() || !std::get<1>(iter->second)) {
       CERR << "WARNING: ONNX initializer '" << initializer.name()
            << "' has no corresponding lc0ex buffer.";
       continue;
     }
 
-    ValidateInitializer(*buffer, initializer);
+    ValidateInitializer(*std::get<1>(iter->second), initializer);
     const auto source = std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(initializer.raw_data().data()),
         initializer.raw_data().size());
-    CopyTensorToHostStaging(*buffer, source, staging);
+    CopyTensorToHostStaging(*std::get<1>(iter->second), source, staging);
   }
 
   executable.CopyPersistentFromHost(staging);
 }
 
-BackendAttributes MakeBackendAttributes(const WeightsFile& weights) {
-  const auto& format = weights.format().network_format();
+BackendAttributes MakeBackendAttributes() {
   return {
-      .has_mlh =
-          format.moves_left() != pblczero::NetworkFormat::MOVES_LEFT_NONE,
-      .has_wdl = format.output() == pblczero::NetworkFormat::OUTPUT_WDL,
+      .has_mlh = true,
+      .has_wdl = true,
       .runs_on_cpu = false,
       .suggested_num_search_threads = 2,
       .recommended_batch_size = 0,
@@ -398,7 +369,11 @@ BackendAttributes MakeBackendAttributes(const WeightsFile& weights) {
   };
 }
 
-void DecodeWdl(std::span<const float> logits, EvalResultPtr result) {
+template <typename ComputeType>
+void DecodeWdl(std::span<const ComputeType> logits_input,
+               EvalResultPtr result) {
+  std::array<float, 3> logits;
+  std::copy(logits_input.begin(), logits_input.end(), logits.begin());
   const float maximum = std::max({logits[0], logits[1], logits[2]});
   const float win = std::exp(logits[0] - maximum);
   const float draw = std::exp(logits[1] - maximum);
@@ -409,57 +384,98 @@ void DecodeWdl(std::span<const float> logits, EvalResultPtr result) {
   if (result.d) *result.d = draw * scale;
 }
 
-// The semaphore admits `concurrency` threads; this hands each of them a
-// distinct index so they address disjoint cached executions.
-struct ExecutionSlotPool {
-  std::mutex mutex;
-  std::vector<bool> in_use;
-};
+template <typename RuntimeType, typename ComputeType>
+class Lc0exBackend;
+template <typename RuntimeType, typename ComputeType>
+class Lc0exBackendComputation;
 
-class ExecutionPermit {
+// Persitent computation cache per thread GPU resources for efficient concurrent
+// inference.
+template <typename RuntimeType, typename ComputeType>
+class Lc0exPersistentComputation {
  public:
-  ExecutionPermit(std::counting_semaphore<>& semaphore,
-                  ExecutionSlotPool* pool = nullptr)
-      : semaphore_(semaphore), pool_(pool) {
-    semaphore_.acquire();
-    if (pool_) {
-      std::lock_guard<std::mutex> lock(pool_->mutex);
-      for (std::size_t i = 0; i < pool_->in_use.size(); ++i) {
-        if (!pool_->in_use[i]) {
-          pool_->in_use[i] = true;
-          index_ = i;
-          break;
-        }
-      }
-    }
+  using Memory = typename RuntimeType::Memory;
+  using HostMemory = typename RuntimeType::HostMemory;
+  using Stream = typename RuntimeType::Stream;
+  using Event = typename RuntimeType::Event;
+  using GraphExec = typename RuntimeType::GraphExec;
+  template <typename T>
+  using Buffer = typename RuntimeType::template Buffer<T>;
+  template <typename T>
+  using HostBuffer = typename RuntimeType::template HostBuffer<T>;
+  using Executable = typename RuntimeType::Executable;
+  using Backend = Lc0exBackend<RuntimeType, ComputeType>;
+
+  Lc0exPersistentComputation(Backend& backend, Executable& executable);
+
+  size_t Size() const { return entries_.size(); }
+
+  void Clear() { entries_.clear(); }
+
+  auto& GetState() { return state_; }
+
+  template <typename CaptureType>
+  void InitialGraphCapture(size_t batch_idx, CaptureType& graph) {
+    graphs_[batch_idx] = graph;
+    graphs_[batch_idx].Upload(state_.stream_);
   }
-
-  ~ExecutionPermit() {
-    if (pool_) {
-      std::lock_guard<std::mutex> lock(pool_->mutex);
-      pool_->in_use[index_] = false;
-    }
-    semaphore_.release();
-  }
-
-  ExecutionPermit(const ExecutionPermit&) = delete;
-  ExecutionPermit& operator=(const ExecutionPermit&) = delete;
-
-  std::size_t index() const { return index_; }
 
  private:
-  std::counting_semaphore<>& semaphore_;
-  ExecutionSlotPool* pool_ = nullptr;
-  std::size_t index_ = 0;
+  template <typename T>
+  struct SameSizeInt {
+    using type =
+        std::conditional_t<sizeof(T) == 2, uint16_t,
+                           std::conditional_t<sizeof(T) == 4, uint32_t, void>>;
+  };
+  template <typename T>
+  using SameSizeIntT = typename SameSizeInt<T>::type;
+  struct Entry {
+    // Inlined vector avoids memory allocations for most common policy map
+    // sizes. 16*3=48 which might help vectorization use gather instructions.
+    absl::InlinedVector<SameSizeIntT<ComputeType>, 48> policy_map;
+    EvalResultPtr result;
+  };
+
+  void DecodePolicy(const Entry& entry, std::span<const ComputeType> logits,
+                    float inverse_policy_temperature) const;
+
+  static constexpr size_t kGpuAlignment = 256;
+  static size_t AlignTo(size_t value, size_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+  }
+
+  static size_t GetHostAllocationSize(size_t max_batch) {
+    return std::max(
+        AlignTo(sizeof(uint64_t) * max_batch * kInputPlanes, kGpuAlignment) +
+            AlignTo(sizeof(ComputeType) * max_batch * kInputPlanes,
+                    kGpuAlignment),
+        AlignTo(sizeof(ComputeType) * max_batch * kNumOutputPolicy,
+                kGpuAlignment) +
+            AlignTo(sizeof(ComputeType) * max_batch * kNumWdlOutputs,
+                    kGpuAlignment) +
+            AlignTo(sizeof(ComputeType) * max_batch, kGpuAlignment));
+  }
+
+  AtomicVector<Entry> entries_;
+  std::unique_ptr<GraphExec[]> graphs_;
+
+  HostMemory host_memory_;
+  lc0ex::ComputationState<RuntimeType, ComputeType> state_;
+
+  friend class Lc0exBackendComputation<RuntimeType, ComputeType>;
 };
 
-class Lc0exCudaBackend;
-
-class Lc0exCudaBackendComputation final : public BackendComputation {
+// A thin wrapper computation to access the persistent computation.
+template <typename RuntimeType, typename ComputeType>
+class Lc0exBackendComputation final : public BackendComputation {
  public:
-  explicit Lc0exCudaBackendComputation(Lc0exCudaBackend* backend);
+  using Persistent = Lc0exPersistentComputation<RuntimeType, ComputeType>;
+  using Backend = Lc0exBackend<RuntimeType, ComputeType>;
+  explicit Lc0exBackendComputation(Backend* backend,
+                                   std::unique_ptr<Persistent>&& persistent);
+  ~Lc0exBackendComputation() override;
 
-  size_t UsedBatchSize() const override { return entries_.size(); }
+  size_t UsedBatchSize() const override { return persistent_->Size(); }
 
   AddInputResult AddInput(const EvalPosition& pos,
                           EvalResultPtr result) override;
@@ -467,28 +483,21 @@ class Lc0exCudaBackendComputation final : public BackendComputation {
   void ComputeBlocking() override;
 
  private:
-  struct Entry {
-    std::array<std::uint64_t, kInputPlanes> masks;
-    std::array<float, kInputPlanes> values;
-    MoveList legal_moves;
-    EvalResultPtr result;
-    int transform;
-  };
+  void ExecuteProgram(std::size_t actual_batch);
 
-  void DecodePolicy(const Entry& entry, std::span<const float> logits) const;
-
-  Lc0exCudaBackend* backend_;
-  AtomicVector<Entry> entries_;
+  Backend* backend_;
+  std::unique_ptr<Persistent> persistent_;
 };
 
 // `auto` is the DAG graph (R34). R22 keyed this on the configured concurrency,
 // because the graph then measured +25 % with one execution slot in flight and
 // -9 % with two. That penalty was the graph serialising against *synchronous*
-// host-to-device copies, not against the second slot: once the copies moved onto
-// the slot's non-blocking stream the sign flipped, and the graph is now +7.2 %
-// at two threads and batch 16 and never negative in a search. `linear` and `off`
-// remain for diagnosis -- `off` in particular, because a graph-launched backend
-// needs `nsys --cuda-graph-trace=node` to show its kernels at all.
+// host-to-device copies, not against the second slot: once the copies moved
+// onto the slot's non-blocking stream the sign flipped, and the graph is now
+// +7.2 % at two threads and batch 16 and never negative in a search. `linear`
+// and `off` remain for diagnosis -- `off` in particular, because a
+// graph-launched backend needs `nsys --cuda-graph-trace=node` to show its
+// kernels at all.
 lc0ex::GraphMode ResolveGraphMode(const std::string& value) {
   if (value == "dag" || value == "on") return lc0ex::GraphMode::kDag;
   if (value == "linear") return lc0ex::GraphMode::kLinear;
@@ -499,60 +508,87 @@ lc0ex::GraphMode ResolveGraphMode(const std::string& value) {
   }
   return lc0ex::GraphMode::kDag;
 }
+using ExecutableVariant =
+    std::variant<const lc0ex::cuda::CudaRuntime::Executable*>;
 
-class Lc0exCudaBackend final : public Backend {
+template <typename RuntimeTypeParam, typename ComputeType>
+class Lc0exBackend final : public Backend {
  public:
-  Lc0exCudaBackend(const WeightsFile& weights, const OptionsDict& options,
-                   const OptionsDict& backend_options)
-      : attributes_(MakeBackendAttributes(weights)),
-        execution_semaphore_(
-            backend_options.GetOrDefault<int>("concurrency", 1)),
+  using RuntimeType = RuntimeTypeParam;
+  using Persistent = Lc0exPersistentComputation<RuntimeType, ComputeType>;
+  using FreePersistentList =
+      absl::InlinedVector<std::unique_ptr<Persistent>, 3>;
+
+  Lc0exBackend(const OptionsDict& options, const OptionsDict& backend_options,
+               const pblczero::NeuralExecutable& executable_proto,
+               std::promise<ExecutableVariant>& promise)
+      : attributes_(MakeBackendAttributes()),
+        graph_mode_(ResolveGraphMode(
+            backend_options.GetOrDefault<std::string>("graph", "auto"))),
+        runtime_(backend_options.GetOrDefault<int>("gpu", 0)),
+        executable_(executable_proto),
+        compute_ordering_event_(lc0ex::EventFlags::DEFAULT),
         backend_options_(
             options.Get<std::string>(SharedBackendParams::kBackendOptionsId)),
-        weights_path_(options.Get<std::string>(SharedBackendParams::kWeightsId)),
-        input_format_(weights.format().network_format().input()) {
+        weights_path_(
+            options.Get<std::string>(SharedBackendParams::kWeightsId)) {
+    LCTRACE_FUNCTION_SCOPE;
+    // Notify weight loading thread that it can start using cuda executable now.
+    promise.set_value(&executable_);
     UpdateConfiguration(options);
 
-    const int concurrency =
-        std::max(1, backend_options.GetOrDefault<int>("concurrency", 1));
-    execution_slot_pool_.in_use.assign(concurrency, false);
-    executions_.resize(concurrency);
+    auto max_batch_size = executable_.GetMaxBatchSize();
+    opt_batch_ = backend_options.GetOrDefault<int>("opt_batch", max_batch_size);
+    max_batch_ = backend_options.GetOrDefault<int>("max_batch", max_batch_size);
+    max_batch_ = std::clamp<int>(max_batch_, 1, max_batch_size);
+    opt_batch_ = std::clamp(opt_batch_, 1, max_batch_);
+    attributes_.maximum_batch_size = max_batch_;
+    attributes_.recommended_batch_size = opt_batch_;
 
-    const std::string lc0ex_path = backend_options.Get<std::string>("lc0ex");
-    if (lc0ex_path.empty()) {
-      throw Exception("The lc0ex-cuda backend requires an lc0ex path.");
+    if (graph_mode_ == lc0ex::GraphMode::kOff) {
+      return;
     }
-
-    const auto executable_proto = LoadExecutableFile(lc0ex_path);
-    CheckNetworkFingerprint(weights, executable_proto);
-
-    // Off by default: it is a strict win only above the ladder's dense band,
-    // which a search at --minibatch-size equal to the top dense rung never
-    // reaches. Worth turning on for a minibatch-128 configuration.
-    split_programs_ = backend_options.GetOrDefault<bool>("split_programs", false);
-    const int gpu = backend_options.GetOrDefault<int>("gpu", 0);
-    runtime_ = lc0ex::CreateLc0exCudaRuntime(
-        gpu, ResolveGraphMode(
-                 backend_options.GetOrDefault<std::string>("graph", "auto")));
-    executable_ = runtime_->Load(executable_proto);
-    InitializePrograms();
-    UploadWeights(weights, *executable_, backend_options);
+    size_t number_of_graphs =
+        backend_options.GetOrDefault("capture_graphs_onload", 2);
+    for (size_t i = 0; i < number_of_graphs; ++i) {
+      persistent_.emplace_back(
+          std::make_unique<Persistent>(*this, executable_));
+    }
+    for (size_t i = 0; i < static_cast<size_t>(max_batch_); ++i) {
+      for (auto& persistent : persistent_) {
+        auto graph =
+            executable_.Capture(graph_mode_, i + 1, persistent->GetState(),
+                                compute_ordering_event_);
+        persistent->InitialGraphCapture(i, graph);
+      }
+    }
   }
 
-  ~Lc0exCudaBackend() override {
-    // Members are destroyed in reverse declaration order, which would free the
-    // Executable before the Executions that point into it: ~Lc0exCudaExecution
-    // reads executable_->context_retained_, synchronises the slot's stream and
-    // frees pinned staging in that context. Clearing the cache here is what
-    // orders it correctly. Without this every lc0ex process segfaults on exit,
-    // after all of its output, which is why it went unnoticed for three rounds.
-    executions_.clear();
-  }
+  ~Lc0exBackend() override { runtime_.SetCurrent(); }
 
   BackendAttributes GetAttributes() const override { return attributes_; }
 
   std::unique_ptr<BackendComputation> CreateComputation() override {
-    return std::make_unique<Lc0exCudaBackendComputation>(this);
+    runtime_.SetCurrent();
+
+    Mutex::Lock lock(persistent_lock_);
+
+    if (!persistent_.empty()) {
+      auto rv =
+          std::make_unique<Lc0exBackendComputation<RuntimeType, ComputeType>>(
+              this, std::move(persistent_.back()));
+      persistent_.pop_back();
+
+      return rv;
+    }
+    lock.unlock();
+    return std::make_unique<Lc0exBackendComputation<RuntimeType, ComputeType>>(
+        this, std::make_unique<Persistent>(*this, executable_));
+  }
+
+  void PushPersistent(std::unique_ptr<Persistent>&& persistent) {
+    Mutex::Lock lock(persistent_lock_);
+    persistent_.push_back(std::move(persistent));
   }
 
   UpdateConfigurationResult UpdateConfiguration(
@@ -574,351 +610,341 @@ class Lc0exCudaBackend final : public Backend {
     return UPDATE_OK;
   }
 
-  // LC0EX_BATCH_HIST=1 records the batch sizes the search actually asks for.
-  // The ladder rounds each one UP to the next compiled program, so the shape of
-  // this histogram -- not the rung rates -- decides how much of the machine the
-  // deployed artifact really uses. Printed once at exit.
-  static void RecordBatch(std::size_t batch_size, std::size_t program_size) {
-    static const bool enabled = [] {
-      const char* value = std::getenv("LC0EX_BATCH_HIST");
-      return value != nullptr && value[0] == '1';
-    }();
-    if (!enabled) return;
-    static std::mutex mutex;
-    static std::map<std::size_t, std::size_t> requested;
-    static std::size_t asked = 0;
-    static std::size_t served = 0;
-    static bool registered = false;
-    const std::lock_guard<std::mutex> lock(mutex);
-    requested[batch_size]++;
-    asked += batch_size;
-    served += program_size;
-    if (!registered) {
-      registered = true;
-      std::atexit([] {
-        std::fprintf(stderr, "\n### lc0ex batch histogram (requested -> count)\n");
-        for (const auto& [size, count] : requested) {
-          std::fprintf(stderr, "%zu %zu\n", size, count);
-        }
-        std::fprintf(stderr, "### positions asked %zu, positions computed %zu, "
-                             "ladder efficiency %.4f\n",
-                     asked, served,
-                     served ? static_cast<double>(asked) / served : 0.0);
-      });
-    }
+  // compute ordering mutex offloads batch ordering to GPU. It makes sure that
+  // subsequent batch starts only when it won't any more cause performance
+  // problems. If Triton produced an optimised graph for multi_stream
+  // configuration this mutex could be conditionally disabled to allow all
+  // threads submit GPU work concurrently. Triton side would require major
+  // changes to optimise kernels for concurrent execution.
+  std::unique_lock<Mutex> GetComputeOrderingLock() {
+    return std::unique_lock{compute_ordering_mutex_};
   }
 
-  const ProgramSpec& FindProgram(std::size_t batch_size) const {
-    const auto iter = std::lower_bound(
-        programs_.begin(), programs_.end(), batch_size,
-        [](const ProgramSpec& program, std::size_t size) {
-          return program.batch_size < size;
-        });
-    if (iter == programs_.end()) {
-      throw Exception("NN input exceeds maximum lc0ex batch size of " +
-                      std::to_string(attributes_.maximum_batch_size) + ".");
-    }
-    RecordBatch(batch_size, iter->batch_size);
-    return *iter;
-  }
-
-  // Two programs instead of one padded program. For a formed batch `b` with
-  // rungs r1 <= b < round_up, running r1 on the first r1 positions and the
-  // smallest rung >= (b - r1) on the rest computes r1 + r2 padded positions
-  // instead of round_up. Taken only when that is a strict saving by at least
-  // `kSplitMargin`, because the split costs a second launch sequence and a
-  // second output gather.
-  //
-  // Returns nullptr when the batch is on a rung, when no split helps, or when
-  // the option is off.
-  struct SplitPlan {
-    const ProgramSpec* first;
-    const ProgramSpec* second;
-    std::size_t first_count;
-  };
-
-  std::optional<SplitPlan> FindSplit(std::size_t batch_size) const {
-    if (!split_programs_) return std::nullopt;
-    const auto up = std::lower_bound(
-        programs_.begin(), programs_.end(), batch_size,
-        [](const ProgramSpec& program, std::size_t size) {
-          return program.batch_size < size;
-        });
-    if (up == programs_.end()) return std::nullopt;
-    if (up->batch_size == batch_size) return std::nullopt;  // already exact
-    if (up == programs_.begin()) return std::nullopt;       // below every rung
-
-    const ProgramSpec& first = *(up - 1);          // largest rung < batch_size
-    const std::size_t rest = batch_size - first.batch_size;
-    const auto second = std::lower_bound(
-        programs_.begin(), programs_.end(), rest,
-        [](const ProgramSpec& program, std::size_t size) {
-          return program.batch_size < size;
-        });
-    if (second == programs_.end()) return std::nullopt;
-
-    const std::size_t split_padded = first.batch_size + second->batch_size;
-    if (split_padded + kSplitMargin > up->batch_size) return std::nullopt;
-    return SplitPlan{&first, &(*second), first.batch_size};
-  }
-
-  // One Execution per (concurrency slot, program), created on first use and
-  // kept for the backend's lifetime. Rebuilding it per inference cost a slot
-  // acquisition plus two heap vectors for each of the ~232 nodes, and with a
-  // graph mode it would also rebuild the graph every time.
-  lc0ex::Execution& GetExecution(std::size_t slot, const ProgramSpec& program) {
-    auto& by_program = executions_[slot];
-    const auto* key = program.program;
-    const auto iter = by_program.find(key);
-    if (iter != by_program.end()) return *iter->second;
-    // Every program on this concurrency slot shares one device execution
-    // slot: only one of them is ever in flight here.
-    lc0ex::Execution* sibling =
-        by_program.empty() ? nullptr : by_program.begin()->second.get();
-    auto execution = executable_->CreateExecution(*program.program, sibling);
-    auto* result = execution.get();
-    by_program.emplace(key, std::move(execution));
-    return *result;
+  // Called from the weight loading thread to initialize backend attributes
+  // after the weights have been converted to ONNX and the executable has been
+  // loaded. SetCurrent is required to allow weight upload thread to do weight
+  // upload directly.
+  void InitializeBackendAttributes(const WeightsFile& weights) {
+    runtime_.SetCurrent();
+    attributes_.has_mlh = weights.onnx_model().has_output_mlh();
+    attributes_.has_wdl = weights.onnx_model().has_output_wdl();
+    input_format_ = weights.format().network_format().input();
   }
 
  private:
-  void InitializePrograms() {
-    for (const auto& program_info : executable_->GetPrograms()) {
-      const auto* program = executable_->FindProgram(program_info.name);
-
-      pblczero::ProgramMetadata metadata;
-      metadata.ParseFromString(program_info.metadata);
-      const std::size_t batch_size = metadata.batch_size();
-      if (batch_size >
-          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw Exception("The lc0ex program '" + program_info.name +
-                        "' has an unsupported batch size.");
-      }
-
-      const auto* input_masks = RequireProgramBuffer(
-          *program, kInputMasksName, pblczero::Buffer::DATA_TYPE_U64,
-          {batch_size, kInputPlanes});
-      const auto* input_values = RequireProgramBuffer(
-          *program, kInputValuesName, pblczero::Buffer::DATA_TYPE_F32,
-          {batch_size, kInputPlanes});
-      const auto* output_policy = RequireProgramBuffer(
-          *program, kOutputPolicyName, pblczero::Buffer::DATA_TYPE_F32,
-          {batch_size, kNumOutputPolicy});
-      const auto* output_wdl = RequireProgramBuffer(
-          *program, kOutputWdlName, pblczero::Buffer::DATA_TYPE_F32,
-          {batch_size, kNumWdlOutputs});
-
-      const auto* output_mlh = program->FindBuffer(kOutputMlhName);
-      if (attributes_.has_mlh && !output_mlh) {
-        throw Exception("The lc0ex program '" + program_info.name +
-                        "' has no moves-left output buffer.");
-      }
-      if (output_mlh) {
-        output_mlh = RequireProgramBuffer(
-            *program, kOutputMlhName, pblczero::Buffer::DATA_TYPE_F32,
-            {batch_size, 1});
-      }
-
-      programs_.push_back({batch_size, program, input_masks, input_values,
-                           output_policy, output_wdl, output_mlh});
-    }
-
-    std::sort(programs_.begin(), programs_.end(),
-              [](const ProgramSpec& lhs, const ProgramSpec& rhs) {
-                return lhs.batch_size < rhs.batch_size;
-              });
-    attributes_.recommended_batch_size =
-        static_cast<int>(programs_.back().batch_size);
-    attributes_.maximum_batch_size =
-        static_cast<int>(programs_.back().batch_size);
-  }
-
-  static constexpr std::size_t kSplitMargin = 8;
-
   BackendAttributes attributes_;
-  bool split_programs_ = false;
-  std::counting_semaphore<> execution_semaphore_;
-  ExecutionSlotPool execution_slot_pool_;
-  std::vector<std::unordered_map<const lc0ex::Program*,
-                                 std::unique_ptr<lc0ex::Execution>>>
-      executions_;
+  int opt_batch_ = 0;
+  int max_batch_ = 0;
+  float inverse_policy_temperature_ = 1.0f;
+  lc0ex::GraphMode graph_mode_ = lc0ex::GraphMode::kDag;
+  RuntimeType runtime_;
+  RuntimeType::Executable executable_;
+  RuntimeType::Event compute_ordering_event_;
+  Mutex compute_ordering_mutex_;
   const std::string backend_options_;
   const std::string weights_path_;
-  const pblczero::NetworkFormat::InputFormat input_format_;
-  float inverse_policy_temperature_ = 1.0f;
+  pblczero::NetworkFormat::InputFormat input_format_;
   FillEmptyHistory fill_empty_history_ = FillEmptyHistory::NO;
-  std::unique_ptr<lc0ex::Runtime> runtime_;
-  std::unique_ptr<lc0ex::Executable> executable_;
-  std::vector<ProgramSpec> programs_;
+  Mutex persistent_lock_;
+  FreePersistentList persistent_ GUARDED_BY(persistent_lock_);
 
-  friend class Lc0exCudaBackendComputation;
+  friend class Lc0exBackendComputation<RuntimeType, ComputeType>;
+  friend class Lc0exPersistentComputation<RuntimeType, ComputeType>;
 };
 
-BackendComputation::AddInputResult Lc0exCudaBackendComputation::AddInput(
+template <typename RuntimeType, typename ComputeType>
+Lc0exPersistentComputation<RuntimeType, ComputeType>::
+    Lc0exPersistentComputation(Backend& backend, Executable& executable)
+    : entries_(backend.GetAttributes().maximum_batch_size),
+      graphs_(std::make_unique<GraphExec[]>(
+          backend.GetAttributes().maximum_batch_size)),
+      host_memory_(
+          GetHostAllocationSize(backend.GetAttributes().maximum_batch_size),
+          kGpuAlignment),
+      state_{
+          {lc0ex::StreamFlags::DEFAULT},
+          {executable.GetExecutionAllocationSize(),
+           executable.GetExecutionAllocationAlignment()},
+          {host_memory_.template AsSpan<uint64_t>(
+              0, sizeof(uint64_t) * backend.GetAttributes().maximum_batch_size *
+                     kInputPlanes)},
+          {host_memory_.template AsSpan<ComputeType>(
+              AlignTo(sizeof(uint64_t) *
+                          backend.GetAttributes().maximum_batch_size *
+                          kInputPlanes,
+                      kGpuAlignment),
+              sizeof(ComputeType) * backend.GetAttributes().maximum_batch_size *
+                  kInputPlanes)},
+          {host_memory_.template AsSpan<ComputeType>(
+              0, sizeof(ComputeType) *
+                     backend.GetAttributes().maximum_batch_size *
+                     kNumOutputPolicy)},
+          {host_memory_.template AsSpan<ComputeType>(
+              AlignTo(sizeof(ComputeType) *
+                          backend.GetAttributes().maximum_batch_size *
+                          kNumOutputPolicy,
+                      kGpuAlignment),
+              sizeof(ComputeType) * backend.GetAttributes().maximum_batch_size *
+                  kNumWdlOutputs)},
+          {host_memory_.template AsSpan<ComputeType>(
+              AlignTo(sizeof(ComputeType) *
+                          backend.GetAttributes().maximum_batch_size *
+                          kNumOutputPolicy,
+                      kGpuAlignment) +
+                  AlignTo(sizeof(ComputeType) *
+                              backend.GetAttributes().maximum_batch_size *
+                              kNumWdlOutputs,
+                          kGpuAlignment),
+              sizeof(ComputeType) *
+                  backend.GetAttributes().maximum_batch_size)},
+          {lc0ex::EventFlags::BLOCKING},
+          {lc0ex::EventFlags::DEFAULT},
+          {lc0ex::EventFlags::DEFAULT},
+          {lc0ex::EventFlags::DEFAULT},
+      }
+
+{}
+
+template <typename RuntimeType, typename ComputeType>
+BackendComputation::AddInputResult
+Lc0exBackendComputation<RuntimeType, ComputeType>::AddInput(
     const EvalPosition& pos, EvalResultPtr result) {
   int transform = 0;
-  const InputPlanes input = EncodePositionForNN(
-      backend_->input_format_, pos.pos, kMoveHistory,
-      backend_->fill_empty_history_, &transform);
+  const InputPlanes input =
+      EncodePositionForNN(backend_->input_format_, pos.pos, kMoveHistory,
+                          backend_->fill_empty_history_, &transform);
 
-  Entry entry{
-      .masks = {},
-      .values = {},
-      .legal_moves = MoveList(pos.legal_moves.begin(), pos.legal_moves.end()),
+  typename Persistent::Entry entry{
+      .policy_map = {},
       .result = result,
-      .transform = transform,
   };
+  entry.policy_map.reserve(pos.legal_moves.size());
+  std::transform(
+      pos.legal_moves.begin(), pos.legal_moves.end(),
+      std::back_inserter(entry.policy_map),
+      [transform](const Move move) { return MoveToNNIndex(move, transform); });
+  size_t idx = persistent_->entries_.emplace_back(std::move(entry));
+  const size_t base = idx * kInputPlanes;
+  auto mask = persistent_->state_.input_mask;
+  auto value = persistent_->state_.input_value;
   for (std::size_t i = 0; i < kInputPlanes; ++i) {
-    entry.masks[i] = input[i].mask;
-    entry.values[i] = input[i].value;
+    mask[base + i] = input[i].mask;
+    value[base + i] = input[i].value;
   }
-  entries_.emplace_back(std::move(entry));
   return ENQUEUED_FOR_EVAL;
 }
 
-Lc0exCudaBackendComputation::Lc0exCudaBackendComputation(
-    Lc0exCudaBackend* backend)
-    : backend_(backend),
-      entries_(backend_->GetAttributes().maximum_batch_size) {}
+template <typename RuntimeType, typename ComputeType>
+Lc0exBackendComputation<RuntimeType, ComputeType>::Lc0exBackendComputation(
+    Backend* backend, std::unique_ptr<Persistent>&& persistent)
+    : backend_(backend), persistent_(std::move(persistent)) {
+  persistent_->Clear();
+}
 
-void Lc0exCudaBackendComputation::DecodePolicy(
-    const Entry& entry, std::span<const float> logits) const {
+template <typename RuntimeType, typename ComputeType>
+Lc0exBackendComputation<RuntimeType, ComputeType>::~Lc0exBackendComputation() {
+  backend_->PushPersistent(std::move(persistent_));
+}
+
+template <typename RuntimeType, typename ComputeType>
+void Lc0exPersistentComputation<RuntimeType, ComputeType>::DecodePolicy(
+    const Entry& entry, std::span<const ComputeType> logits,
+    float inverse_policy_temperature) const {
   float maximum = -std::numeric_limits<float>::infinity();
-  for (std::size_t i = 0; i < entry.legal_moves.size(); ++i) {
-    const std::size_t policy_index =
-        MoveToNNIndex(entry.legal_moves[i], entry.transform);
+  for (std::size_t i = 0; i < entry.policy_map.size(); ++i) {
+    const std::size_t policy_index = entry.policy_map[i];
     entry.result.p[i] = logits[policy_index];
     maximum = std::max(maximum, entry.result.p[i]);
   }
 
   float total = 0.0f;
   for (float& value : entry.result.p) {
-    value = FastExp(
-        (value - maximum) * backend_->inverse_policy_temperature_);
+    value = FastExp((value - maximum) * inverse_policy_temperature);
     total += value;
   }
   const float scale = total > 0.0f ? 1.0f / total : 1.0f;
   for (float& value : entry.result.p) value *= scale;
 }
 
-void Lc0exCudaBackendComputation::ComputeBlocking() {
-  const std::size_t actual_batch = entries_.size();
+template <typename RuntimeType, typename ComputeType>
+void Lc0exBackendComputation<RuntimeType, ComputeType>::ExecuteProgram(
+    size_t actual_batch) {
+  backend_->executable_.Run(actual_batch, persistent_->state_,
+                            backend_->compute_ordering_event_);
+}
+
+template <typename RuntimeType, typename ComputeType>
+void Lc0exBackendComputation<RuntimeType, ComputeType>::ComputeBlocking() {
+  const size_t actual_batch = persistent_->entries_.size();
   if (actual_batch == 0) return;
+  LCTRACE_FUNCTION_SCOPE;
 
-  const auto split = backend_->FindSplit(actual_batch);
-  const ProgramSpec& program =
-      split ? *split->first : backend_->FindProgram(actual_batch);
+  if (persistent_->graphs_[actual_batch - 1]) {
+    std::unique_lock<Mutex> lock(backend_->GetComputeOrderingLock());
+    persistent_->graphs_[actual_batch - 1].Launch(persistent_->state_.stream_);
+  } else {
+    std::unique_lock<Mutex> lock(backend_->GetComputeOrderingLock());
+    ExecuteProgram(actual_batch);
 
-  std::vector<std::uint64_t> masks(actual_batch * kInputPlanes);
-  std::vector<float> values(actual_batch * kInputPlanes);
-  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
-    const std::size_t offset = sample * kInputPlanes;
-    std::copy(entries_[sample].masks.begin(), entries_[sample].masks.end(),
-              masks.begin() + offset);
-    std::copy(entries_[sample].values.begin(), entries_[sample].values.end(),
-              values.begin() + offset);
-  }
+    if (backend_->graph_mode_ != lc0ex::GraphMode::kOff) {
+      // Keep lock for graph construction because all cuda driver calls would
+      // have lock contention if other thread is submitting work or capturing
+      // graphs. External lock avoids thread bouncing slowdown.
+      auto graph = backend_->executable_.Capture(
+          backend_->graph_mode_, actual_batch, persistent_->state_,
+          backend_->compute_ordering_event_);
 
-  const auto mask_bytes = std::as_bytes(std::span<const std::uint64_t>(masks));
-  const auto value_bytes = std::as_bytes(std::span<const float>(values));
-
-  std::vector<float> policy(actual_batch * kNumOutputPolicy);
-  std::vector<float> wdl(actual_batch * kNumWdlOutputs);
-  std::vector<float> mlh;
-  if (program.output_mlh) mlh.resize(actual_batch);
-
-  const auto policy_bytes = std::as_writable_bytes(std::span<float>(policy));
-  const auto wdl_bytes = std::as_writable_bytes(std::span<float>(wdl));
-
-  // Everything is issued on this slot's stream, so the copies overlap another
-  // slot's kernels. All of it, including the reads, completes at Synchronize().
-  //
-  // `part` runs `count` positions starting at `offset` on one program. The two
-  // halves of a split share one device slot, so the first is fully synchronised
-  // -- outputs already copied out -- before the second touches the allocation.
-  {
-    ExecutionPermit permit(backend_->execution_semaphore_,
-                           &backend_->execution_slot_pool_);
-    const auto part = [&](const ProgramSpec& spec, std::size_t offset,
-                          std::size_t count) {
-      lc0ex::Execution& execution = backend_->GetExecution(permit.index(), spec);
-      execution.GetBuffer(*spec.input_masks)
-          .CopyFromHostAsync(mask_bytes.subspan(offset * kInputPlanes *
-                                                sizeof(std::uint64_t)),
-                             count * kInputPlanes * sizeof(std::uint64_t));
-      execution.GetBuffer(*spec.input_values)
-          .CopyFromHostAsync(
-              value_bytes.subspan(offset * kInputPlanes * sizeof(float)),
-              count * kInputPlanes * sizeof(float));
-      execution.Run();
-      execution.GetBuffer(*spec.output_policy)
-          .CopyToHostAsync(
-              policy_bytes.subspan(offset * kNumOutputPolicy * sizeof(float)),
-              count * kNumOutputPolicy * sizeof(float));
-      execution.GetBuffer(*spec.output_wdl)
-          .CopyToHostAsync(
-              wdl_bytes.subspan(offset * kNumWdlOutputs * sizeof(float)),
-              count * kNumWdlOutputs * sizeof(float));
-      if (spec.output_mlh) {
-        const auto mlh_bytes = std::as_writable_bytes(std::span<float>(mlh));
-        execution.GetBuffer(*spec.output_mlh)
-            .CopyToHostAsync(mlh_bytes.subspan(offset * sizeof(float)),
-                             count * sizeof(float));
+      // We allow other thread to submit work after the graph construction
+      // because following instantiation is slow and suffers less from
+      // concurrent GPU submissions.
+      if (lock.owns_lock()) {
+        lock.unlock();
       }
-      execution.Synchronize();
-    };
 
-    if (split) {
-      part(*split->first, 0, split->first_count);
-      part(*split->second, split->first_count,
-           actual_batch - split->first_count);
-    } else {
-      part(program, 0, actual_batch);
+      // Graph instantiation happens when it is copied to the exec holder.
+      persistent_->graphs_[actual_batch - 1] = graph;
+      // We trigger upload now to avoid potential slower graph launch when there
+      // is likely less time left before deadline or we are already late.
+      persistent_->graphs_[actual_batch - 1].Upload(
+          persistent_->state_.stream_);
     }
   }
 
+  // Do blocking wait on the GPU which triggers early to account for wake up
+  // latency. Blocking sleep makes only sense if the batch is large enough to
+  // let heads take longer than the wakeup latency.
+  if (static_cast<int>(actual_batch * 5) >
+      backend_->GetAttributes().recommended_batch_size) {
+    persistent_->state_.sleep_event_.Synchronize();
+  }
+
+  // Wait for wdl download to complete and do the softmax.
+  persistent_->state_.wdl_download_done_.Synchronize();
   for (std::size_t sample = 0; sample < actual_batch; ++sample) {
-    const Entry& entry = entries_[sample];
-    DecodeWdl(std::span<const float>(
-                  wdl.data() + sample * kNumWdlOutputs, kNumWdlOutputs),
-              entry.result);
+    const auto& entry = persistent_->entries_[sample];
+    DecodeWdl(
+        std::span<const ComputeType>(
+            persistent_->state_.output_wdl.data() + sample * kNumWdlOutputs,
+            kNumWdlOutputs),
+        entry.result);
+  }
+
+  persistent_->state_.policy_download_done_.Synchronize();
+  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
+    const auto& entry = persistent_->entries_[sample];
+
     if (!entry.result.p.empty()) {
-      DecodePolicy(
-          entry,
-          std::span<const float>(policy.data() + sample * kNumOutputPolicy,
-                                 kNumOutputPolicy));
+      persistent_->DecodePolicy(entry,
+                                std::span<const ComputeType>(
+                                    persistent_->state_.output_policy.data() +
+                                        sample * kNumOutputPolicy,
+                                    kNumOutputPolicy),
+                                backend_->inverse_policy_temperature_);
     }
-    if (entry.result.m) {
-      *entry.result.m = mlh.empty() ? 0.0f : mlh[sample];
+  }
+
+  // Node priorities makes GPU scheduler prefer other heads. This means we
+  // process mlh head last. Other heads require CPU side processing.
+  persistent_->state_.mlh_download_done_.Synchronize();
+  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
+    if (persistent_->entries_[sample].result.m) {
+      *persistent_->entries_[sample].result.m =
+          persistent_->state_.output_mlh[sample];
     }
   }
 }
 
-class Lc0exCudaBackendFactory final : public BackendFactory {
+class Lc0exBackendFactory final : public BackendFactory {
  public:
   int GetPriority() const override { return 1; }
   std::string_view GetName() const override { return kBackendName; }
 
   std::unique_ptr<Backend> Create(const OptionsDict& options) override {
+    std::unique_ptr<Backend> backend;
+    pblczero::NeuralExecutable executable_proto;
     OptionsDict backend_options;
     backend_options.AddSubdictFromString(
         options.Get<std::string>(SharedBackendParams::kBackendOptionsId));
 
-    const std::string weights_path =
-        options.Get<std::string>(SharedBackendParams::kWeightsId);
-    const std::optional<WeightsFile> weights = LoadWeights(weights_path);
-    if (!weights) {
-      throw Exception("The lc0ex-cuda backend requires a network file.");
+    using BackendVariant =
+        std::variant<Lc0exBackend<lc0ex::cuda::CudaRuntime, _Float16>*,
+                     Lc0exBackend<lc0ex::cuda::CudaRuntime, float>*>;
+    std::promise<BackendVariant> backend_promise;
+    auto backend_future = backend_promise.get_future();
+    std::promise<ExecutableVariant> executable_promise;
+    auto executable_future = executable_promise.get_future();
+    std::promise<const pblczero::NeuralExecutable*> executable_proto_promise;
+    auto executable_proto_future = executable_proto_promise.get_future();
+
+    // Load the weights in a separate thread to allow cuda initialization and
+    // graph capture for free.
+    auto weights = std::async(std::launch::async, [&]() {
+      const std::string weights_path =
+          options.Get<std::string>(SharedBackendParams::kWeightsId);
+      const std::optional<WeightsFile> weights = LoadWeights(weights_path);
+      if (!weights) {
+        throw Exception("The lc0ex-cuda backend requires a network file.");
+      }
+
+      auto backend_variant = backend_future.get();
+      auto source = executable_proto_future.get();
+      auto executable_variant = executable_future.get();
+
+      // Call correct backend variant.
+      std::visit(
+          [&](auto* backend) {
+            using RuntimeType =
+                typename std::decay_t<decltype(*backend)>::RuntimeType;
+            using ExecutableType = typename RuntimeType::Executable;
+            auto exec = std::get<const ExecutableType*>(executable_variant);
+            UploadWeights(*backend, *weights, *exec, *source, backend_options);
+          },
+          backend_variant);
+      return true;
+    });
+
+    try {
+      const std::string lc0ex_path = backend_options.Get<std::string>("lc0ex");
+      if (lc0ex_path.empty()) {
+        throw Exception("The lc0ex-cuda backend requires an lc0ex path.");
+      }
+
+      executable_proto = LoadExecutableFile(lc0ex_path);
+
+      executable_proto_promise.set_value(&executable_proto);
+
+      if (executable_proto.io_data_type() ==
+          pblczero::Buffer_DataType_DATA_TYPE_F16) {
+        auto typed_backend =
+            std::make_unique<Lc0exBackend<lc0ex::cuda::CudaRuntime, _Float16>>(
+                options, backend_options, executable_proto, executable_promise);
+        backend_promise.set_value(typed_backend.get());
+        backend = std::move(typed_backend);
+      } else if (executable_proto.io_data_type() ==
+                 pblczero::Buffer_DataType_DATA_TYPE_F32) {
+        auto typed_backend =
+            std::make_unique<Lc0exBackend<lc0ex::cuda::CudaRuntime, float>>(
+                options, backend_options, executable_proto, executable_promise);
+        backend_promise.set_value(typed_backend.get());
+        backend = std::move(typed_backend);
+      } else {
+        backend_promise.set_exception(std::make_exception_ptr(
+            Exception("Unsupported data type for lc0ex-cuda backend.")));
+      }
+      backend_options.CheckAllOptionsRead(std::string(kBackendName));
+    } catch (...) {
+      backend_promise.set_exception(std::current_exception());
+      executable_proto_promise.set_exception(std::current_exception());
+      executable_promise.set_exception(std::current_exception());
     }
 
-    auto backend = std::make_unique<Lc0exCudaBackend>(*weights, options,
-                                                       backend_options);
-    backend_options.CheckAllOptionsRead(std::string(kBackendName));
+    // Wait for the weights to be uploaded before returning the backend.
+    weights.get();
     return backend;
   }
 };
 
-REGISTER_BACKEND(Lc0exCudaBackendFactory)
+REGISTER_BACKEND(Lc0exBackendFactory)
 
 }  // namespace
 }  // namespace lczero
