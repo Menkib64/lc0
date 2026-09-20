@@ -629,7 +629,18 @@ struct Config {
     auto node_option = options_->Get<std::string>(kSearchNodeOptionId);
     OptionsDict node_dict;
     node_dict.AddSubdictFromString(node_option);
-    if (node_dict.Exists<std::string>("node")) {
+    if (node_dict.Exists<int>("node")) {
+      int numa_id = node_dict.Get<int>("node");
+      if (numa_id < 0 || (size_t)numa_id >= GetNodeCount()) {
+        throw Exception("Invalid NUMA node id: " + std::to_string(numa_id) +
+                        ". Valid range is 0 to " +
+                        std::to_string(GetNodeCount() - 1));
+      }
+      hwloc_obj_t numa_obj;
+      ReportHWLocError(numa_obj = hwloc_get_obj_by_type(
+                           topology_, HWLOC_OBJ_NUMANODE, numa_id));
+      rv |= numa_obj->cpuset;
+    } else if (node_dict.Exists<std::string>("node")) {
       auto numa_ids = StrSplit(node_dict.Get<std::string>("node"), ",");
       for (const auto& numa_id_str : numa_ids) {
         int numa_id = std::stoi(numa_id_str);
@@ -644,7 +655,18 @@ struct Config {
         rv |= numa_obj->cpuset;
       }
     }
-    if (node_dict.Exists<std::string>("package")) {
+    if (node_dict.Exists<int>("package")) {
+      int package_id = node_dict.Get<int>("package");
+      if (package_id < 0 || (size_t)package_id >= GetSocketCount()) {
+        throw Exception("Invalid package id: " + std::to_string(package_id) +
+                        ". Valid range is 0 to " +
+                        std::to_string(GetSocketCount() - 1));
+      }
+      hwloc_obj_t package_obj;
+      ReportHWLocError(package_obj = hwloc_get_obj_by_type(
+                           topology_, HWLOC_OBJ_PACKAGE, package_id));
+      rv |= package_obj->cpuset;
+    } else if (node_dict.Exists<std::string>("package")) {
       auto package_ids = StrSplit(node_dict.Get<std::string>("package"), ",");
       for (const auto& package_id_str : package_ids) {
         int package_id = std::stoi(package_id_str);
@@ -659,7 +681,18 @@ struct Config {
         rv |= package_obj->cpuset;
       }
     }
-    if (node_dict.Exists<std::string>("core")) {
+    if (node_dict.Exists<int>("core")) {
+      int core_id = node_dict.Get<int>("core");
+      if (core_id < 0 || (size_t)core_id >= GetCoreCount()) {
+        throw Exception("Invalid core id: " + std::to_string(core_id) +
+                        ". Valid range is 0 to " +
+                        std::to_string(GetCoreCount() - 1));
+      }
+      hwloc_obj_t core_obj;
+      ReportHWLocError(
+          core_obj = hwloc_get_obj_by_type(topology_, HWLOC_OBJ_CORE, core_id));
+      rv |= core_obj->cpuset;
+    } else if (node_dict.Exists<std::string>("core")) {
       auto core_ids = StrSplit(node_dict.Get<std::string>("core"), ",");
       for (const auto& core_id_str : core_ids) {
         int core_id = std::stoi(core_id_str);
