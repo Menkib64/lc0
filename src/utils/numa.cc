@@ -31,6 +31,7 @@
 #include <numeric>
 
 #include "numa_config.h"
+#include "utils/string.h"
 #if HAVE_LIBHWLOC
 #include <hwloc.h>
 #ifdef _WIN32
@@ -80,7 +81,9 @@ const OptionId kUseAllCoresOptionId{
 const OptionId kSearchNodeOptionId{
     {.long_flag = "search-numa-node",
      .uci_option = "SearchNUMANode",
-     .help_text = "The NUMA node to use for the search threads.",
+     .help_text = "The NUMA node to use for the search threads. It can define "
+                  "selecting node=\"<id>,...\", package=\"<id>,...\", or "
+                  "core=\"<id>,...\".",
      .visibility = OptionId::kProOnly}};
 const OptionId kSearchWorkerShareCoreId{
     {.long_flag = "use-search-worker-share-core",
@@ -336,7 +339,9 @@ struct Config {
 
   void SetAffinity(const CpuSet& cpuset) {
     assert(topology_);
-    assert(cpuset);
+    if (!cpuset) {
+      return;
+    }
 #ifdef _WIN32
     CpuSet modified_set = cpuset;
     MaybeModifyGroupSet(modified_set);
@@ -513,24 +518,18 @@ struct Config {
     }
   };
 
-  void ReserveCoresOnNode(size_t node_id, size_t count) {
-    hwloc_obj_t numa_obj;
+  void ReserveCoresOnNode(const CpuSet& node_set, size_t count) {
     reserved_set_.Clear();
     reserved_cores_.clear();
-    auto nodetype =
-        GetNodeCount() == 1 ? HWLOC_OBJ_MACHINE : HWLOC_OBJ_NUMANODE;
-
-    ReportHWLocError(numa_obj =
-                         hwloc_get_obj_by_type(topology_, nodetype, node_id));
-    ReserveCores(numa_obj, count);
+    ReserveCores(node_set, count);
     core_reservation_id_++;
   }
 
-  void ReserveCores(hwloc_obj_t parent, size_t count) {
+  void ReserveCores(const CpuSet& node_set, size_t count) {
     std::vector<hwloc_obj_t> core_objs;
     hwloc_obj_t core = nullptr;
     while ((core = hwloc_get_next_obj_inside_cpuset_by_type(
-                topology_, parent->cpuset, HWLOC_OBJ_CORE, core))) {
+                topology_, node_set, HWLOC_OBJ_CORE, core))) {
       core_objs.push_back(core);
     }
     // Use random shuffle to avoid using same cores for all SearchWorkers when
@@ -592,7 +591,7 @@ struct Config {
     cpuset |= core->cpuset;
   }
 
-  bool CheckReservedCores(size_t node_id, size_t num_workers) {
+  bool CheckReservedCores(const CpuSet& node_set, size_t num_workers) {
     if (!use_search_shared_core_) {
       if (reserved_cores_.size() != num_workers) return false;
     } else {
@@ -601,11 +600,8 @@ struct Config {
           [](size_t sum, hwloc_obj_t obj) { return sum + obj->arity; });
       if (threads < num_workers || threads > num_workers + 1) return false;
     }
-    hwloc_obj_t node_obj;
-    ReportHWLocError(node_obj = hwloc_get_obj_by_type(
-                         topology_, HWLOC_OBJ_NUMANODE, node_id));
     for (auto core : reserved_cores_) {
-      if (!hwloc_bitmap_intersects(node_obj->cpuset, core->cpuset)) {
+      if (!hwloc_bitmap_intersects(node_set, core->cpuset)) {
         return false;
       }
     }
@@ -628,6 +624,64 @@ struct Config {
 
   void SetOptions(const OptionsDict& options) { options_ = &options; }
 
+  CpuSet ParseSearchNodeOption() {
+    CpuSet rv;
+    auto node_option = options_->Get<std::string>(kSearchNodeOptionId);
+    OptionsDict node_dict;
+    node_dict.AddSubdictFromString(node_option);
+    if (node_dict.Exists<std::string>("node")) {
+      auto numa_ids = StrSplit(node_dict.Get<std::string>("node"), ",");
+      for (const auto& numa_id_str : numa_ids) {
+        int numa_id = std::stoi(numa_id_str);
+        if (numa_id < 0 || (size_t)numa_id >= GetNodeCount()) {
+          throw Exception("Invalid NUMA node id: " + std::to_string(numa_id) +
+                          ". Valid range is 0 to " +
+                          std::to_string(GetNodeCount() - 1));
+        }
+        hwloc_obj_t numa_obj;
+        ReportHWLocError(numa_obj = hwloc_get_obj_by_type(
+                             topology_, HWLOC_OBJ_NUMANODE, numa_id));
+        rv |= numa_obj->cpuset;
+      }
+    }
+    if (node_dict.Exists<std::string>("package")) {
+      auto package_ids = StrSplit(node_dict.Get<std::string>("package"), ",");
+      for (const auto& package_id_str : package_ids) {
+        int package_id = std::stoi(package_id_str);
+        if (package_id < 0 || (size_t)package_id >= GetSocketCount()) {
+          throw Exception("Invalid package id: " + std::to_string(package_id) +
+                          ". Valid range is 0 to " +
+                          std::to_string(GetSocketCount() - 1));
+        }
+        hwloc_obj_t package_obj;
+        ReportHWLocError(package_obj = hwloc_get_obj_by_type(
+                             topology_, HWLOC_OBJ_PACKAGE, package_id));
+        rv |= package_obj->cpuset;
+      }
+    }
+    if (node_dict.Exists<std::string>("core")) {
+      auto core_ids = StrSplit(node_dict.Get<std::string>("core"), ",");
+      for (const auto& core_id_str : core_ids) {
+        int core_id = std::stoi(core_id_str);
+        if (core_id < 0 || (size_t)core_id >= GetCoreCount()) {
+          throw Exception("Invalid core id: " + std::to_string(core_id) +
+                          ". Valid range is 0 to " +
+                          std::to_string(GetCoreCount() - 1));
+        }
+        hwloc_obj_t core_obj;
+        ReportHWLocError(core_obj = hwloc_get_obj_by_type(
+                             topology_, HWLOC_OBJ_CORE, core_id));
+        rv |= core_obj->cpuset;
+      }
+    }
+
+    if (!rv) {
+      throw Exception("Invalid search NUMA node option: " + node_option +
+                      ". No valid CPU set found.");
+    }
+    return rv;
+  }
+
   void UpdateOptions() {
     bool all_cores = options_->Get<bool>(kUseAllCoresOptionId);
     bool shuffle_reservations =
@@ -635,7 +689,7 @@ struct Config {
     use_search_thread_affinity_ =
         options_->Get<bool>(kUseThreadAfinityOptionId) && IsAffinitySupported();
     bool use_search_shared_core = options_->Get<bool>(kSearchWorkerShareCoreId);
-    size_t node_id = options_->Get<int>(kSearchNodeOptionId);
+    auto node_set = ParseSearchNodeOption();
     if (all_cores != use_all_cores_) {
       use_all_cores_ = all_cores;
       reserved_set_.Clear();
@@ -652,13 +706,11 @@ struct Config {
       reserved_set_.Clear();
       reserved_cores_.clear();
     }
-    if (node_id >= GetNodeCount()) {
-      CERR << "Requested search NUMA node " << node_id << " but only "
-           << GetNodeCount() << " nodes available. "
-           << "Using node " << GetNodeCount() - 1 << " instead." << std::endl;
-      node_id = GetNodeCount() - 1;
+    if (node_set != search_numa_set_) {
+      search_numa_set_ = std::move(node_set);
+      reserved_set_.Clear();
+      reserved_cores_.clear();
     }
-    search_node_id_ = node_id;
   }
 
   static ConfigLock Lock() { return ConfigLock(Instance()); }
@@ -687,6 +739,7 @@ struct Config {
 
   CpuSet initial_affinity_;
   CpuSet reserved_set_;
+  CpuSet search_numa_set_;
   std::vector<hwloc_obj_t> reserved_cores_;
   std::vector<WindowsGroup> windows_groups_;
   const OptionsDict* options_ = nullptr;
@@ -694,7 +747,6 @@ struct Config {
   bool use_all_cores_ = false;
   bool shuffle_reservations_ = true;
   bool use_search_shared_core_ = false;
-  size_t search_node_id_ = 0;
   size_t core_reservation_id_ = 0;
   GeneratorType rng_;
 
@@ -712,7 +764,7 @@ void Numa::Init(OptionsParser* parser) {
   parser->Add<BoolOption>(kUseAllCoresOptionId) = false;
   parser->Add<BoolOption>(kShuffleCoreReservationOptionId) = true;
   parser->Add<BoolOption>(kSearchWorkerShareCoreId) = false;
-  parser->Add<IntOption>(kSearchNodeOptionId, 0, 512) = 0;
+  parser->Add<StringOption>(kSearchNodeOptionId) = "package=0";
 #if HAVE_LIBHWLOC
   auto config = Config::Lock();
   config->SetOptions(parser->GetOptionsDict());
@@ -746,7 +798,7 @@ void Numa::ReserveSearchWorkers([[maybe_unused]] size_t num_workers) {
   auto config = Config::Lock();
   config->UpdateOptions();
   if (!config->use_search_thread_affinity_) return;
-  unsigned node_id = config->search_node_id_;
+  auto& node_id = config->search_numa_set_;
   if (config->CheckReservedCores(node_id, num_workers)) {
     return;
   }
@@ -765,8 +817,8 @@ void Numa::BindTaskWorkersToSocket() {
 #if HAVE_LIBHWLOC
   auto config = Config::Lock();
   if (!config->use_search_thread_affinity_) return;
-  CpuSet cpuset;
-  config->GetNumaSet(config->search_node_id_, cpuset);
+  CpuSet cpuset(config->search_numa_set_);
+  cpuset &= ~config->reserved_set_;
   config->SetAffinity(cpuset);
 #endif
 }
