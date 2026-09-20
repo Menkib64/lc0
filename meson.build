@@ -1004,6 +1004,8 @@ endif
   endif
   if cu_dart.found()
     numa_config.set('HAVE_CUDART', '1')
+    deps += cu_dart
+    includes += cuda_includes
   else
     numa_config.set('HAVE_CUDART', '0')
   endif
