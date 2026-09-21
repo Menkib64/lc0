@@ -395,6 +395,14 @@ void CudaEvent::Synchronize() const {
   LC0EX_CUDA_CHECK(cuEventSynchronize(*this));
 }
 
+bool CudaEvent::IsCompleted() const {
+  assert(event_ != nullptr);
+  CUresult status = cuEventQuery(*this);
+  if (status == CUDA_SUCCESS) return true;
+  if (status == CUDA_ERROR_NOT_READY) return false;
+  ThrowCuda(status, "cuEventQuery", __FILE__, __LINE__);
+}
+
 // Parse a buffer description from the lc0ex protobuf and create a BufferInfo
 // structure that contains implicit stride information if Triton omits it.
 BufferInfo MakeBufferInfo(const pblczero::Buffer& buffer) {

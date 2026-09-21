@@ -368,21 +368,6 @@ BackendAttributes MakeBackendAttributes() {
   };
 }
 
-template <typename ComputeType>
-void DecodeWdl(std::span<const ComputeType> logits_input,
-               EvalResultPtr result) {
-  std::array<float, 3> logits;
-  std::copy(logits_input.begin(), logits_input.end(), logits.begin());
-  const float maximum = std::max({logits[0], logits[1], logits[2]});
-  const float win = std::exp(logits[0] - maximum);
-  const float draw = std::exp(logits[1] - maximum);
-  const float loss = std::exp(logits[2] - maximum);
-  const float scale = 1.0f / (win + draw + loss);
-
-  if (result.q) *result.q = (win - loss) * scale;
-  if (result.d) *result.d = draw * scale;
-}
-
 template <typename RuntimeType, typename ComputeType>
 class Lc0exBackend;
 template <typename RuntimeType, typename ComputeType>
@@ -420,6 +405,39 @@ class Lc0exPersistentComputation {
   void InitialGraphCapture(size_t batch_idx, CaptureType& graph) {
     graphs_[batch_idx] = graph;
     graphs_[batch_idx].Upload(state_.stream_);
+  }
+
+  void DecodeWdl() const {
+    for (size_t i = 0; i < entries_.size(); ++i) {
+      auto logits_input =
+          state_.output_wdl.subspan(i * kNumWdlOutputs, kNumWdlOutputs);
+      auto& result = entries_[i].result;
+      std::array<float, 3> logits;
+      std::copy(logits_input.begin(), logits_input.end(), logits.begin());
+      const float maximum = std::max({logits[0], logits[1], logits[2]});
+      const float win = std::exp(logits[0] - maximum);
+      const float draw = std::exp(logits[1] - maximum);
+      const float loss = std::exp(logits[2] - maximum);
+      const float scale = 1.0f / (win + draw + loss);
+
+      if (result.q) *result.q = (win - loss) * scale;
+      if (result.d) *result.d = draw * scale;
+    }
+  }
+
+  void DecodePolicy(float inverse_policy_temperature) const {
+    for (size_t i = 0; i < entries_.size(); ++i) {
+      DecodePolicy(i, state_.output_policy, inverse_policy_temperature);
+    }
+  }
+
+  void DecodeMlh() const {
+    for (size_t i = 0; i < entries_.size(); ++i) {
+      auto& result = entries_[i].result;
+      if (result.m) {
+        *result.m = state_.output_mlh[i];
+      }
+    }
   }
 
  private:
@@ -860,38 +878,47 @@ void Lc0exBackendComputation<RuntimeType, ComputeType>::ComputeBlocking() {
     persistent_->state_.sleep_event_.Synchronize();
   }
 
-  // Wait for wdl download to complete and do the softmax.
-  persistent_->state_.wdl_download_done_.Synchronize();
-  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
-    const auto& entry = persistent_->entries_[sample];
-    DecodeWdl(
-        std::span<const ComputeType>(
-            persistent_->state_.output_wdl.data() + sample * kNumWdlOutputs,
-            kNumWdlOutputs),
-        entry.result);
-  }
+  constexpr size_t kWdlHead = 0x1;
+  constexpr size_t kPolicyHead = 0x2;
+  constexpr size_t kMlhHead = 0x4;
+  size_t pending_heads = kWdlHead | kPolicyHead | kMlhHead;
 
-  persistent_->state_.policy_download_done_.Synchronize();
-  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
-    const auto& entry = persistent_->entries_[sample];
-
-    if (!entry.result.p.empty()) {
-      persistent_->DecodePolicy(sample,
-                                std::span<const ComputeType>(
-                                    persistent_->state_.output_policy.data() +
-                                        sample * kNumOutputPolicy,
-                                    kNumOutputPolicy),
-                                backend_->inverse_policy_temperature_);
+  while (pending_heads) {
+    if ((pending_heads & kWdlHead) != 0) {
+      bool found = pending_heads == kWdlHead;
+      if (found) {
+        persistent_->state_.wdl_download_done_.Synchronize();
+      } else {
+        found = persistent_->state_.wdl_download_done_.IsCompleted();
+      }
+      if (found) {
+        pending_heads ^= kWdlHead;
+        persistent_->DecodeWdl();
+      }
     }
-  }
-
-  // Node priorities makes GPU scheduler prefer other heads. This means we
-  // process mlh head last. Other heads require CPU side processing.
-  persistent_->state_.mlh_download_done_.Synchronize();
-  for (std::size_t sample = 0; sample < actual_batch; ++sample) {
-    if (persistent_->entries_[sample].result.m) {
-      *persistent_->entries_[sample].result.m =
-          persistent_->state_.output_mlh[sample];
+    if ((pending_heads & kPolicyHead) != 0) {
+      bool found = pending_heads == kPolicyHead;
+      if (found) {
+        persistent_->state_.policy_download_done_.Synchronize();
+      } else {
+        found = persistent_->state_.policy_download_done_.IsCompleted();
+      }
+      if (found) {
+        pending_heads ^= kPolicyHead;
+        persistent_->DecodePolicy(backend_->inverse_policy_temperature_);
+      }
+    }
+    if ((pending_heads & kMlhHead) != 0) {
+      bool found = pending_heads == kMlhHead;
+      if (found) {
+        persistent_->state_.mlh_download_done_.Synchronize();
+      } else {
+        found = persistent_->state_.mlh_download_done_.IsCompleted();
+      }
+      if (found) {
+        pending_heads ^= kMlhHead;
+        persistent_->DecodeMlh();
+      }
     }
   }
 }
