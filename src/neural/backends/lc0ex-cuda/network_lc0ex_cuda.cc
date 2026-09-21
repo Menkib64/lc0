@@ -362,7 +362,7 @@ BackendAttributes MakeBackendAttributes() {
       .has_mlh = true,
       .has_wdl = true,
       .runs_on_cpu = false,
-      .suggested_num_search_threads = 2,
+      .suggested_num_search_threads = 1,
       .recommended_batch_size = 0,
       .maximum_batch_size = 0,
   };
