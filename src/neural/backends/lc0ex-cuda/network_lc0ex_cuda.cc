@@ -565,10 +565,14 @@ class Lc0exBackend final : public Backend {
     opt_batch_ = std::clamp(opt_batch_, 1, max_batch_);
     attributes_.maximum_batch_size = max_batch_;
     attributes_.recommended_batch_size = opt_batch_;
+  }
 
+  void CaptureGraphs(const OptionsDict& backend_options)
+      NO_THREAD_SAFETY_ANALYSIS {
     if (graph_mode_ == lc0ex::GraphMode::kOff) {
       return;
     }
+    LCTRACE_FUNCTION_SCOPE;
     size_t number_of_graphs =
         backend_options.GetOrDefault("capture_graphs_onload", 2);
     for (size_t i = 0; i < number_of_graphs; ++i) {
@@ -935,44 +939,54 @@ class Lc0exBackendFactory final : public BackendFactory {
     backend_options.AddSubdictFromString(
         options.Get<std::string>(SharedBackendParams::kBackendOptionsId));
 
-    using BackendVariant =
-        std::variant<Lc0exBackend<lc0ex::cuda::CudaRuntime, _Float16>*,
-                     Lc0exBackend<lc0ex::cuda::CudaRuntime, float>*>;
-    std::promise<BackendVariant> backend_promise;
-    auto backend_future = backend_promise.get_future();
-    std::promise<ExecutableVariant> executable_promise;
-    auto executable_future = executable_promise.get_future();
-    std::promise<const pblczero::NeuralExecutable*> executable_proto_promise;
-    auto executable_proto_future = executable_proto_promise.get_future();
+    std::future<bool> weights;
 
-    // Load the weights in a separate thread to allow cuda initialization and
-    // graph capture for free.
-    auto weights = std::async(std::launch::async, [&]() {
-      const std::string weights_path =
-          options.Get<std::string>(SharedBackendParams::kWeightsId);
-      const std::optional<WeightsFile> weights = LoadWeights(weights_path);
-      if (!weights) {
-        throw Exception("The lc0ex-cuda backend requires a network file.");
-      }
+    {
+      using BackendVariant =
+          std::variant<Lc0exBackend<lc0ex::cuda::CudaRuntime, _Float16>*,
+                       Lc0exBackend<lc0ex::cuda::CudaRuntime, float>*>;
+      std::promise<BackendVariant> backend_promise;
+      auto backend_future = backend_promise.get_future();
+      std::promise<ExecutableVariant> executable_promise;
+      auto executable_future = executable_promise.get_future();
+      std::promise<const pblczero::NeuralExecutable*> executable_proto_promise;
+      auto executable_proto_future = executable_proto_promise.get_future();
+      // Load the weights in a separate thread to allow cuda initialization
+      // and graph capture for free.
+      weights = std::async(
+          std::launch::async,
+          [backend_future = std::move(backend_future),
+           executable_future = std::move(executable_future),
+           executable_proto_future = std::move(executable_proto_future),
+           &options, &backend_options]() mutable {
+            const std::string weights_path =
+                options.Get<std::string>(SharedBackendParams::kWeightsId);
+            const std::optional<WeightsFile> weights =
+                LoadWeights(weights_path);
+            if (!weights) {
+              throw Exception(
+                  "The lc0ex-cuda backend requires a network file.");
+            }
 
-      auto backend_variant = backend_future.get();
-      auto source = executable_proto_future.get();
-      auto executable_variant = executable_future.get();
+            auto backend_variant = backend_future.get();
+            auto source = executable_proto_future.get();
+            auto executable_variant = executable_future.get();
 
-      // Call correct backend variant.
-      std::visit(
-          [&](auto* backend) {
-            using RuntimeType =
-                typename std::decay_t<decltype(*backend)>::RuntimeType;
-            using ExecutableType = typename RuntimeType::Executable;
-            auto exec = std::get<const ExecutableType*>(executable_variant);
-            UploadWeights(*backend, *weights, *exec, *source, backend_options);
-          },
-          backend_variant);
-      return true;
-    });
+            // Call correct backend variant.
+            std::visit(
+                [&](auto* backend) {
+                  using RuntimeType =
+                      typename std::decay_t<decltype(*backend)>::RuntimeType;
+                  using ExecutableType = typename RuntimeType::Executable;
+                  auto exec =
+                      std::get<const ExecutableType*>(executable_variant);
+                  UploadWeights(*backend, *weights, *exec, *source,
+                                backend_options);
+                },
+                backend_variant);
+            return true;
+          });
 
-    try {
       const std::string lc0ex_path = backend_options.Get<std::string>("lc0ex");
       if (lc0ex_path.empty()) {
         throw Exception("The lc0ex-cuda backend requires an lc0ex path.");
@@ -988,23 +1002,23 @@ class Lc0exBackendFactory final : public BackendFactory {
             std::make_unique<Lc0exBackend<lc0ex::cuda::CudaRuntime, _Float16>>(
                 options, backend_options, executable_proto, executable_promise);
         backend_promise.set_value(typed_backend.get());
+        auto typed_ptr = typed_backend.get();
         backend = std::move(typed_backend);
+        typed_ptr->CaptureGraphs(backend_options);
       } else if (executable_proto.io_data_type() ==
                  pblczero::Buffer_DataType_DATA_TYPE_F32) {
         auto typed_backend =
             std::make_unique<Lc0exBackend<lc0ex::cuda::CudaRuntime, float>>(
                 options, backend_options, executable_proto, executable_promise);
         backend_promise.set_value(typed_backend.get());
+        auto typed_ptr = typed_backend.get();
         backend = std::move(typed_backend);
+        typed_ptr->CaptureGraphs(backend_options);
       } else {
         backend_promise.set_exception(std::make_exception_ptr(
             Exception("Unsupported data type for lc0ex-cuda backend.")));
       }
       backend_options.CheckAllOptionsRead(std::string(kBackendName));
-    } catch (...) {
-      backend_promise.set_exception(std::current_exception());
-      executable_proto_promise.set_exception(std::current_exception());
-      executable_promise.set_exception(std::current_exception());
     }
 
     // Wait for the weights to be uploaded before returning the backend.
