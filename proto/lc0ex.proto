@@ -105,6 +105,7 @@ message Buffer {
     DATA_TYPE_F32 = 1;
     DATA_TYPE_U8 = 2;
     DATA_TYPE_F16 = 10;
+    DATA_TYPE_U32 = 12;
     DATA_TYPE_U64 = 13;
     DATA_TYPE_BF16 = 16;
   }
@@ -185,6 +186,7 @@ message Node {
     optional string parameter_name = 1;
     optional AllocationLocation allocation = 2;
     optional Symbol symbol = 3;
+    optional Parameter parameter = 4;
   }
 
   message Memcpy {
@@ -204,7 +206,7 @@ message Node {
 
   // Launch dimensions in x, y, z order. Each field must contain between one and
   // three nonzero values; omitted trailing dimensions are one.
-  repeated uint32 grid = 4;
+  repeated string grid = 4;
   repeated uint32 block = 5;
 
   // Dynamic shared memory requested for this launch.

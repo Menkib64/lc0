@@ -65,4 +65,6 @@ bool Is960CastlingFormat(pblczero::NetworkFormat::InputFormat input_format);
 uint16_t MoveToNNIndex(Move move, int transform);
 Move MoveFromNNIndex(int idx, int transform);
 
+uint16_t MoveToPremapIndex(Move move, int transform);
+
 }  // namespace lczero

@@ -59,6 +59,7 @@
 #include "neural/onnx/converter.h"
 #include "neural/register.h"
 #include "neural/shared_params.h"
+#include "neural/tables/attention_policy_map.h"
 #include "proto/lc0ex.pb.h"
 #include "runtime/lc0ex_cuda.h"
 #include "utils/atomic_vector.h"
@@ -71,7 +72,7 @@ namespace lczero {
 namespace {
 
 constexpr std::string_view kBackendName = "lc0ex-cuda";
-constexpr std::size_t kNumOutputPolicy = 1858;
+constexpr std::size_t kNumOutputPolicy = 218;
 constexpr std::size_t kNumWdlOutputs = 3;
 
 FillEmptyHistory ParseHistoryFill(const std::string& value) {
@@ -410,7 +411,10 @@ class Lc0exPersistentComputation {
 
   size_t Size() const { return entries_.size(); }
 
-  void Clear() { entries_.clear(); }
+  void Clear() {
+    std::fill(total_legal_moves_.begin(), total_legal_moves_.end(), 0);
+    entries_.clear();
+  }
 
   auto& GetState() { return state_; }
 
@@ -430,13 +434,10 @@ class Lc0exPersistentComputation {
   template <typename T>
   using SameSizeIntT = typename SameSizeInt<T>::type;
   struct Entry {
-    // Inlined vector avoids memory allocations for most common policy map
-    // sizes. 16*3=48 which might help vectorization use gather instructions.
-    absl::InlinedVector<SameSizeIntT<ComputeType>, 48> policy_map;
     EvalResultPtr result;
   };
 
-  void DecodePolicy(const Entry& entry, std::span<const ComputeType> logits,
+  void DecodePolicy(size_t index, std::span<const ComputeType> logits,
                     float inverse_policy_temperature) const;
 
   static constexpr size_t kGpuAlignment = 256;
@@ -446,7 +447,10 @@ class Lc0exPersistentComputation {
 
   static size_t GetHostAllocationSize(size_t max_batch) {
     return std::max(
-        AlignTo(sizeof(uint64_t) * max_batch * kInputPlanes, kGpuAlignment) +
+        AlignTo(sizeof(uint32_t) * max_batch * kNumOutputPolicy,
+                kGpuAlignment) +
+            AlignTo(sizeof(uint64_t) * max_batch * kInputPlanes,
+                    kGpuAlignment) +
             AlignTo(sizeof(ComputeType) * max_batch * kInputPlanes,
                     kGpuAlignment),
         AlignTo(sizeof(ComputeType) * max_batch * kNumOutputPolicy,
@@ -457,6 +461,7 @@ class Lc0exPersistentComputation {
   }
 
   AtomicVector<Entry> entries_;
+  std::vector<int> total_legal_moves_;
   std::unique_ptr<GraphExec[]> graphs_;
 
   HostMemory host_memory_;
@@ -656,37 +661,50 @@ template <typename RuntimeType, typename ComputeType>
 Lc0exPersistentComputation<RuntimeType, ComputeType>::
     Lc0exPersistentComputation(Backend& backend, Executable& executable)
     : entries_(backend.GetAttributes().maximum_batch_size),
+      total_legal_moves_(backend.GetAttributes().maximum_batch_size),
       graphs_(std::make_unique<GraphExec[]>(
           backend.GetAttributes().maximum_batch_size)),
       host_memory_(
           GetHostAllocationSize(backend.GetAttributes().maximum_batch_size),
           kGpuAlignment),
       state_{
-          {lc0ex::StreamFlags::DEFAULT},
-          {executable.GetExecutionAllocationSize(),
-           executable.GetExecutionAllocationAlignment()},
-          {host_memory_.template AsSpan<uint64_t>(
-              0, sizeof(uint64_t) * backend.GetAttributes().maximum_batch_size *
-                     kInputPlanes)},
-          {host_memory_.template AsSpan<ComputeType>(
-              AlignTo(sizeof(uint64_t) *
+          .stream_ = {lc0ex::StreamFlags::DEFAULT},
+          .device_memory_ = {executable.GetExecutionAllocationSize(),
+                             executable.GetExecutionAllocationAlignment()},
+          .input_mapping = {host_memory_.template AsSpan<std::uint32_t>(
+              0, sizeof(std::uint32_t) *
+                     backend.GetAttributes().maximum_batch_size *
+                     kNumOutputPolicy)},
+          .input_mask = {host_memory_.template AsSpan<uint64_t>(
+              AlignTo(sizeof(std::uint32_t) *
                           backend.GetAttributes().maximum_batch_size *
-                          kInputPlanes,
+                          kNumOutputPolicy,
                       kGpuAlignment),
+              sizeof(uint64_t) * backend.GetAttributes().maximum_batch_size *
+                  kInputPlanes)},
+          .input_value = {host_memory_.template AsSpan<ComputeType>(
+              AlignTo(sizeof(std::uint32_t) *
+                          backend.GetAttributes().maximum_batch_size *
+                          kNumOutputPolicy,
+                      kGpuAlignment) +
+                  AlignTo(sizeof(uint64_t) *
+                              backend.GetAttributes().maximum_batch_size *
+                              kInputPlanes,
+                          kGpuAlignment),
               sizeof(ComputeType) * backend.GetAttributes().maximum_batch_size *
                   kInputPlanes)},
-          {host_memory_.template AsSpan<ComputeType>(
+          .output_policy = {host_memory_.template AsSpan<ComputeType>(
               0, sizeof(ComputeType) *
                      backend.GetAttributes().maximum_batch_size *
                      kNumOutputPolicy)},
-          {host_memory_.template AsSpan<ComputeType>(
+          .output_wdl = {host_memory_.template AsSpan<ComputeType>(
               AlignTo(sizeof(ComputeType) *
                           backend.GetAttributes().maximum_batch_size *
                           kNumOutputPolicy,
                       kGpuAlignment),
               sizeof(ComputeType) * backend.GetAttributes().maximum_batch_size *
                   kNumWdlOutputs)},
-          {host_memory_.template AsSpan<ComputeType>(
+          .output_mlh = {host_memory_.template AsSpan<ComputeType>(
               AlignTo(sizeof(ComputeType) *
                           backend.GetAttributes().maximum_batch_size *
                           kNumOutputPolicy,
@@ -697,10 +715,11 @@ Lc0exPersistentComputation<RuntimeType, ComputeType>::
                           kGpuAlignment),
               sizeof(ComputeType) *
                   backend.GetAttributes().maximum_batch_size)},
-          {lc0ex::EventFlags::BLOCKING},
-          {lc0ex::EventFlags::DEFAULT},
-          {lc0ex::EventFlags::DEFAULT},
-          {lc0ex::EventFlags::DEFAULT},
+          .sleep_event_ = {lc0ex::EventFlags::BLOCKING},
+          .wdl_download_done_ = {lc0ex::EventFlags::DEFAULT},
+          .mlh_download_done_ = {lc0ex::EventFlags::DEFAULT},
+          .policy_download_done_ = {lc0ex::EventFlags::DEFAULT},
+          .total_legal_moves_ = {1},
       }
 
 {}
@@ -715,18 +734,32 @@ Lc0exBackendComputation<RuntimeType, ComputeType>::AddInput(
                           backend_->fill_empty_history_, &transform);
 
   typename Persistent::Entry entry{
-      .policy_map = {},
       .result = result,
   };
-  entry.policy_map.reserve(pos.legal_moves.size());
-  std::transform(
-      pos.legal_moves.begin(), pos.legal_moves.end(),
-      std::back_inserter(entry.policy_map),
-      [transform](const Move move) { return MoveToNNIndex(move, transform); });
   size_t idx = persistent_->entries_.emplace_back(std::move(entry));
+  int start_legal_moves = 0;
+  if (idx > 0) {
+    std::atomic_ref<int> previous_total_legal_moves(
+        persistent_->total_legal_moves_[idx - 1]);
+    while ((start_legal_moves = previous_total_legal_moves.load(
+                std::memory_order_relaxed)) == 0) {
+      SpinloopPause();
+    }
+  }
+  std::atomic_ref<int> total_legal_moves(persistent_->total_legal_moves_[idx]);
+  total_legal_moves.store(
+      start_legal_moves + static_cast<int>(pos.legal_moves.size()),
+      std::memory_order_relaxed);
   const size_t base = idx * kInputPlanes;
   auto mask = persistent_->state_.input_mask;
   auto value = persistent_->state_.input_value;
+  auto policy_map = persistent_->state_.input_mapping;
+  std::transform(pos.legal_moves.begin(), pos.legal_moves.end(),
+                 policy_map.begin() + start_legal_moves,
+                 [transform, idx](const Move move) {
+                   return MoveToPremapIndex(move, transform) +
+                          idx * std::size(kAttnPolicyMap);
+                 });
   for (std::size_t i = 0; i < kInputPlanes; ++i) {
     mask[base + i] = input[i].mask;
     value[base + i] = input[i].value;
@@ -748,12 +781,20 @@ Lc0exBackendComputation<RuntimeType, ComputeType>::~Lc0exBackendComputation() {
 
 template <typename RuntimeType, typename ComputeType>
 void Lc0exPersistentComputation<RuntimeType, ComputeType>::DecodePolicy(
-    const Entry& entry, std::span<const ComputeType> logits,
+    size_t idx, std::span<const ComputeType> logits,
     float inverse_policy_temperature) const {
+  const auto& entry = entries_[idx];
+  if (entry.result.p.empty()) return;
+  size_t legal_moves = total_legal_moves_[idx];
+  size_t start_index = 0;
+  if (idx > 0) {
+    start_index = total_legal_moves_[idx - 1];
+    legal_moves -= start_index;
+  }
+  assert(legal_moves == entry.result.p.size());
   float maximum = -std::numeric_limits<float>::infinity();
-  for (std::size_t i = 0; i < entry.policy_map.size(); ++i) {
-    const std::size_t policy_index = entry.policy_map[i];
-    entry.result.p[i] = logits[policy_index];
+  for (std::size_t i = 0; i < legal_moves; ++i) {
+    entry.result.p[i] = logits[start_index + i];
     maximum = std::max(maximum, entry.result.p[i]);
   }
 
@@ -778,6 +819,9 @@ void Lc0exBackendComputation<RuntimeType, ComputeType>::ComputeBlocking() {
   const size_t actual_batch = persistent_->entries_.size();
   if (actual_batch == 0) return;
   LCTRACE_FUNCTION_SCOPE;
+
+  size_t legal_moves = persistent_->total_legal_moves_[actual_batch - 1];
+  persistent_->state_.total_legal_moves_ = legal_moves;
 
   if (persistent_->graphs_[actual_batch - 1]) {
     std::unique_lock<Mutex> lock(backend_->GetComputeOrderingLock());
@@ -834,7 +878,7 @@ void Lc0exBackendComputation<RuntimeType, ComputeType>::ComputeBlocking() {
     const auto& entry = persistent_->entries_[sample];
 
     if (!entry.result.p.empty()) {
-      persistent_->DecodePolicy(entry,
+      persistent_->DecodePolicy(sample,
                                 std::span<const ComputeType>(
                                     persistent_->state_.output_policy.data() +
                                         sample * kNumOutputPolicy,

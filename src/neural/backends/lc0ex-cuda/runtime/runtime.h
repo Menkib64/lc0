@@ -60,6 +60,7 @@ template <typename R, typename C>
 struct ComputationState {
   typename R::Stream stream_;
   typename R::Memory device_memory_;
+  typename R::template HostBuffer<uint32_t> input_mapping;
   typename R::template HostBuffer<uint64_t> input_mask;
   typename R::template HostBuffer<C> input_value;
   typename R::template HostBuffer<C> output_policy;
@@ -69,6 +70,7 @@ struct ComputationState {
   typename R::Event wdl_download_done_;
   typename R::Event mlh_download_done_;
   typename R::Event policy_download_done_;
+  size_t total_legal_moves_;
 };
 
 // Handles and descriptor references returned by an Executable remain valid

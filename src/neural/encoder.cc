@@ -28,6 +28,7 @@
 #include "neural/encoder.h"
 
 #include <algorithm>
+#include "neural/tables/attention_policy_map.h"
 
 namespace lczero {
 
@@ -585,6 +586,25 @@ const std::array kPackedIdxToNNIdx = []() {
   return indices;
 }();
 
+const std::array kPackedIdxToPremapIdx = []() {
+  std::array<uint16_t, 64 * 64 * 4> indices;
+  size_t idx = 0;
+  for (const char* move_str : kMoveStrs) {
+    std::string move(move_str);
+    uint16_t from = Square::Parse(move.substr(0, 2)).as_idx();
+    uint16_t to = Square::Parse(move.substr(2, 2)).as_idx();
+    uint16_t promotion = move.size() == 5 ? PieceType::Parse(move[4]).idx : 0;
+    uint16_t packed_idx = promotion * 64 * 64 + from * 64 + to;
+    auto iter = std::find(std::begin(kAttnPolicyMap), std::end(kAttnPolicyMap), idx);
+    if (iter == std::end(kAttnPolicyMap)) {
+      throw Exception("Failed to generate kPackedIdxToPremapIdx, packed index not found in kAttnPolicyMap");
+    }
+    indices[packed_idx] = std::distance(std::begin(kAttnPolicyMap), iter);
+    idx++;
+  }
+  return indices;
+}();
+
 uint16_t MoveAsPackedInt(Move move) {
   enum Masks : uint16_t {
     // clang-format off
@@ -616,6 +636,16 @@ uint16_t MoveToNNIndex(Move move, int transform) {
       move.is_promotion() ? Move::WhitePromotion(from, to, move.promotion())
                           : Move::White(from, to);
   return kPackedIdxToNNIdx[MoveAsPackedInt(transformed)];
+}
+
+uint16_t MoveToPremapIndex(Move move, int transform) {
+  if (transform == 0) return kPackedIdxToPremapIdx[MoveAsPackedInt(move)];
+  const Square from = Transform(move.from(), transform);
+  const Square to = Transform(move.to(), transform);
+  const Move transformed =
+      move.is_promotion() ? Move::WhitePromotion(from, to, move.promotion())
+                          : Move::White(from, to);
+  return kPackedIdxToPremapIdx[MoveAsPackedInt(transformed)];
 }
 
 Move MoveFromNNIndex(int idx, int transform) {

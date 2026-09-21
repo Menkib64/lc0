@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -119,6 +120,8 @@ std::size_t ElementSize(pblczero::Buffer::DataType type) {
       return sizeof(std::uint8_t);
     case pblczero::Buffer::DATA_TYPE_F16:
       return sizeof(std::uint16_t);
+    case pblczero::Buffer::DATA_TYPE_U32:
+      return sizeof(std::uint32_t);
     case pblczero::Buffer::DATA_TYPE_U64:
       return sizeof(std::uint64_t);
     case pblczero::Buffer::DATA_TYPE_BF16:
@@ -204,7 +207,7 @@ class LaunchState {
   using ComputeType = T;
   static constexpr bool is_cuda_capturing = false;
   ComputationState<CudaRuntime, T>& cs_;
-  size_t batch_size;
+  size_t batch_size_;
   const CudaMemory& persistent_memory_;
   CudaEvent& compute_ordering_event_;
 
@@ -226,33 +229,50 @@ class CaptureState : public LaunchState<T> {
 // Kernel argument implementation. Each type implements its own kernel argument
 // logic based on the Triton node arguments.
 template <typename State>
-void ArgumentNull::operator()(void*& arg, std::uint64_t& value,
+bool ArgumentNull::operator()(void*& arg, std::uint64_t& value,
                               const State&) const {
   arg = static_cast<void*>(&value);
   value = 0;
+  return false;
 }
 
 template <typename State>
-void ArgumentSymbol::operator()(void*& arg, std::uint64_t& value,
+bool ArgumentSymbol::operator()(void*& arg, std::uint64_t& value,
                                 const State&) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(symbol_);
+  return false;
 }
 
 template <typename State>
-void ArgumentPersistentBuffer::operator()(void*& arg, std::uint64_t& value,
+bool ArgumentPersistentBuffer::operator()(void*& arg, std::uint64_t& value,
                                           const State& state) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(state.persistent_memory_.Data() +
                                           offset_);
+  return false;
 }
 
 template <typename State>
-void ArgumentExecutionBuffer::operator()(void*& arg, std::uint64_t& value,
+bool ArgumentExecutionBuffer::operator()(void*& arg, std::uint64_t& value,
                                          const State& state) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(state.cs_.device_memory_.Data() +
                                           offset_);
+  return false;
+}
+
+template <ArgumentName name>
+template <typename State>
+bool ArgumentParameter<name>::operator()(void*& arg, std::uint64_t& value,
+                                         const State& state) const {
+  arg = static_cast<void*>(&value);
+  switch (name) {
+    case ArgumentName::kTotalLelgalMoves:
+      value = state.cs_.total_legal_moves_;
+      break;
+  }
+  return true;
 }
 
 // The CudaStream class implementation. It wraps a CUDA stream and provides
@@ -429,8 +449,285 @@ std::pair<CUdeviceptr, CUdeviceptr> AllocateDeviceMemory(
   return {base, static_cast<CUdeviceptr>(aligned_address)};
 }
 
-// The KernelNode class implementation. It represents a kernel node in the lc0ex
-// graph and provides methods to launch the kernel with the appropriate
+class Lexer {
+ public:
+  explicit Lexer(std::string_view input) : input_(input) {}
+
+  enum TokenType { kIdentifier, kNumber, kOp, kEnd };
+
+  std::tuple<TokenType, std::string_view> NextToken() {
+    SkipWhitespace();
+    if (pos_ >= input_.size()) {
+      return {kEnd, {}};
+    }
+    size_t start = pos_;
+    if (std::isdigit(input_[pos_]) ||
+        (input_[pos_] == '-' && pos_ + 1 < input_.size() &&
+         std::isdigit(input_[pos_ + 1]))) {
+      ++pos_;
+      while (pos_ < input_.size() && std::isdigit(input_[pos_])) {
+        ++pos_;
+      }
+      return {kNumber, input_.substr(start, pos_ - start)};
+    }
+    if (input_[pos_] == '+' || input_[pos_] == '-' || input_[pos_] == '*' ||
+        input_[pos_] == '/' || input_[pos_] == '(' || input_[pos_] == ')') {
+      ++pos_;
+      return {kOp, input_.substr(start, 1)};
+    }
+
+    if (!std::isalpha(input_[pos_]) && input_[pos_] != '_') {
+      throw Exception(
+          "Unexpected character in formula: " + std::string(input_) + " at " +
+          std::to_string(pos_) + ": " + std::string(1, input_[pos_]));
+    }
+
+    while (pos_ < input_.size() &&
+           (std::isalpha(input_[pos_]) || input_[pos_] == '_')) {
+      ++pos_;
+    }
+    return {kIdentifier, input_.substr(start, pos_ - start)};
+  }
+
+  void SkipWhitespace() {
+    while (pos_ < input_.size() && std::isspace(input_[pos_])) {
+      ++pos_;
+    }
+  }
+
+  std::string_view input_;
+  size_t pos_ = 0;
+};
+
+template <typename T>
+long Constant::operator()(const OpVector&, T&) const {
+  return value_;
+}
+
+template <typename T>
+long VariableOp::operator()(const OpVector&, T& state) const {
+  switch (op_) {
+    case VariableOpType::kReadTotalLegalMoves:
+      return state.cs_.total_legal_moves_;
+    case VariableOpType::kReadBatchSize:
+      return state.batch_size_;
+  }
+  throw Exception("Unknown variable operation.");
+}
+
+template <typename T>
+long UnaryOp::operator()(const OpVector& other, T& state) const {
+  auto value =
+      std::visit([&other, &state](const auto& op) { return op(other, state); },
+                 other[idx_]);
+  switch (op_) {
+    case UnaryOpType::kNegate:
+      return -value;
+    case UnaryOpType::kAbs:
+      return std::abs(value);
+  }
+  throw Exception("Unknown unary operation.");
+}
+
+template <typename T>
+long BinaryOp::operator()(const OpVector& other, T& state) const {
+  auto left =
+      std::visit([&other, &state](const auto& op) { return op(other, state); },
+                 other[idx1_]);
+  auto right =
+      std::visit([&other, &state](const auto& op) { return op(other, state); },
+                 other[idx2_]);
+  switch (op_) {
+    case BinaryOpType::kAdd:
+      return left + right;
+    case BinaryOpType::kSubtract:
+      return left - right;
+    case BinaryOpType::kMultiply:
+      return left * right;
+    case BinaryOpType::kDivide:
+      if (right == 0) {
+        throw Exception("Division by zero in formula.");
+      }
+      return left / right;
+  }
+  throw Exception("Unknown binary operation.");
+}
+
+class RecursiveParser {
+ public:
+  explicit RecursiveParser(std::string_view input) : lexer_(input) {}
+
+  unsigned ParseIdentifier(std::string_view identifier) {
+    if (identifier == "total_legal_moves") {
+      result_.emplace_back(std::in_place_type<VariableOp>,
+                           VariableOpType::kReadTotalLegalMoves);
+      return result_.size() - 1;
+    } else if (identifier == "batch_size") {
+      result_.emplace_back(std::in_place_type<VariableOp>,
+                           VariableOpType::kReadBatchSize);
+      return result_.size() - 1;
+    } else if (identifier == "abs") {
+      std::tie(token, value) = lexer_.NextToken();
+      if (token != Lexer::kOp || value != "(") {
+        throw Exception("Expected '(' after 'abs' in formula.");
+      }
+      unsigned idx = Parse();
+      if (token != Lexer::kOp || value != ")") {
+        throw Exception("Expected ')' after 'abs' argument in formula.");
+      }
+      result_.emplace_back(std::in_place_type<UnaryOp>, UnaryOpType::kAbs, idx);
+      return result_.size() - 1;
+    } else {
+      throw Exception("Unknown identifier: " + std::string(identifier));
+    }
+  }
+
+  unsigned ParseNumber(std::string_view number) {
+    try {
+      int value = std::stoi(std::string(number));
+      result_.emplace_back(std::in_place_type<Constant>, value);
+      return result_.size() - 1;
+    } catch (const std::exception& e) {
+      throw Exception(
+          "Invalid number in formula: " + std::string(lexer_.input_) + " at " +
+          std::to_string(lexer_.pos_) + std::string(number));
+    }
+  }
+
+  struct BinaryOpPriority {
+    char op;
+    int priority;
+    BinaryOpType type;
+  };
+
+  static constexpr std::array<BinaryOpPriority, 4> kBinaryOpPriorities = {{
+      {'+', 1, BinaryOpType::kAdd},
+      {'-', 1, BinaryOpType::kSubtract},
+      {'*', 2, BinaryOpType::kMultiply},
+      {'/', 2, BinaryOpType::kDivide},
+  }};
+
+  unsigned ParseOperator(unsigned left_idx, int priority) {
+    if (token != Lexer::kOp) {
+      return left_idx;
+    }
+    if (value == ")") {
+      return left_idx;
+    }
+    auto iter = std::find_if(
+        kBinaryOpPriorities.begin(), kBinaryOpPriorities.end(),
+        [this](const BinaryOpPriority& op) { return op.op == value[0]; });
+    if (iter == kBinaryOpPriorities.end()) {
+      throw Exception("Unknown binary operator: " + std::string(lexer_.input_) +
+                      " at " + std::to_string(lexer_.pos_) + ": " +
+                      std::string(value));
+    }
+    BinaryOpType op_type = iter->type;
+    int op_priority = iter->priority;
+    if (op_priority <= priority) {
+      return left_idx;
+    }
+    unsigned right_idx = Parse(op_priority);
+    result_.emplace_back(std::in_place_type<BinaryOp>, op_type, left_idx,
+                         right_idx);
+    return ParseOperator(result_.size() - 1, priority);
+  }
+
+  unsigned ParseUnaryOperator(std::string_view op) {
+    if (op == "-") {
+      unsigned idx = Parse();
+      if (idx >= result_.size()) {
+        throw Exception(
+            "Invalid index returned from Parse() in unary '-' formula.");
+      }
+      result_.emplace_back(std::in_place_type<UnaryOp>, UnaryOpType::kNegate,
+                           idx);
+      return result_.size() - 1;
+    } else if (op == "(") {
+      unsigned idx = Parse();
+      if (token != Lexer::kOp || value != ")") {
+        throw Exception(
+            "Expected ')' after '(': " + std::string(lexer_.input_) + " at " +
+            std::to_string(lexer_.pos_) + ": " + std::string(value));
+      }
+      return idx;
+    } else {
+      throw Exception("Unknown unary operator: " + std::string(lexer_.input_) +
+                      " at " + std::to_string(lexer_.pos_) + ": " +
+                      std::string(op));
+    }
+  }
+
+  unsigned Parse(int priority = 0) {
+    std::tie(token, value) = lexer_.NextToken();
+    unsigned left_idx = 0;
+    switch (token) {
+      case Lexer::kIdentifier:
+        left_idx = ParseIdentifier(value);
+        break;
+      case Lexer::kNumber:
+        left_idx = ParseNumber(value);
+        break;
+      case Lexer::kOp:
+        left_idx = ParseUnaryOperator(value);
+        break;
+      case Lexer::kEnd:
+        throw Exception("Unexpected end: " + std::string(lexer_.input_) +
+                        " at " + std::to_string(lexer_.pos_));
+    }
+    std::tie(token, value) = lexer_.NextToken();
+    return ParseOperator(left_idx, priority);
+  }
+
+  Lexer lexer_;
+  OpVector result_;
+  Lexer::TokenType token;
+  std::string_view value;
+};
+
+GridFormula& GridFormula::operator=(std::string_view formula) {
+  RecursiveParser parser(formula);
+  unsigned idx = parser.Parse();
+  if (idx >= parser.result_.size()) {
+    throw Exception("Invalid index returned from Parse(): " + std::string(formula) +
+                    " at " + std::to_string(parser.lexer_.pos_) + ": " +
+                    std::string(parser.value));
+  }
+  if (parser.token != Lexer::kEnd) {
+    throw Exception("Unexpected token after formula: " +
+                    std::string(parser.lexer_.input_) + " at " +
+                    std::to_string(parser.lexer_.pos_) + ": " +
+                    std::string(parser.value));
+  }
+  operators_ = std::move(parser.result_);
+  return *this;
+}
+
+template <typename State>
+unsigned int GridFormula::operator()(State& state) const {
+  if (operators_.empty()) {
+    throw Exception("GridFormula operators are empty.");
+  }
+  auto value = std::visit(
+      [&state, this](const auto& op) { return op(operators_, state); },
+      operators_.back());
+  if (value < 0) {
+    throw Exception("GridFormula evaluated to a negative value.");
+  }
+  return static_cast<unsigned int>(value);
+}
+
+bool GridFormula::RequiresModification() const {
+  for (const auto& op : operators_) {
+    if (std::visit([](auto& op) { return op.RequiresModification(); }, op)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The KernelNode class implementation. It represents a kernel node in the
+// lc0ex graph and provides methods to launch the kernel with the appropriate
 // arguments and configuration.
 KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
                        const pblczero::Kernel& kernel, void* function)
@@ -443,6 +740,12 @@ KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
     LC0EX_CUDA_CHECK(cuFuncSetAttribute(
         reinterpret_cast<CUfunction>(function_),
         CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shared_memory));
+  }
+  if (source.grid_size() != 3) {
+    throw Exception("Kernel node grid size is not 3.");
+  }
+  if (source.block_size() != 3) {
+    throw Exception("Kernel node block size is not 3.");
   }
   std::copy(source.grid().begin(), source.grid().end(), grid_.begin());
   std::copy(source.block().begin(), source.block().end(), block_.begin());
@@ -485,6 +788,14 @@ KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
                 ALLOCATION_UNKNOWN:
               throw Exception("Kernel argument allocation kind is unknown.");
           }
+        } else if (argument.has_parameter()) {
+          if (argument.parameter().name() == "total_legal_moves") {
+            arguments_.emplace_back(
+                std::in_place_type<
+                    ArgumentParameter<ArgumentName::kTotalLelgalMoves>>);
+          } else {
+            throw Exception("Kernel argument parameter name is unknown.");
+          }
         } else {
           throw Exception("Kernel argument is not a symbol, allocation.");
         }
@@ -505,28 +816,33 @@ template <typename State>
 auto KernelNode::operator()(State& state) const {
   state.argval.resize(arguments_.size());
   state.argptr.resize(arguments_.size());
+  bool needs_mod = false;
   for (size_t i = 0; i < arguments_.size(); ++i) {
-    std::visit(
+    needs_mod |= std::visit(
         [&state, i](auto&& arg) {
-          arg(state.argptr[i], state.argval[i], state);
+          return arg(state.argptr[i], state.argval[i], state);
         },
         arguments_[i]);
   }
 
   if constexpr (!State::is_cuda_capturing) {
-    LC0EX_CUDA_CHECK(cuLaunchKernel(
-        reinterpret_cast<CUfunction>(function_), grid_[0], grid_[1], grid_[2],
-        block_[0], block_[1], block_[2], dynamic_shared_memory_bytes_,
-        state.cs_.stream_, state.argptr.data(), nullptr));
+    LC0EX_CUDA_CHECK(
+        cuLaunchKernel(reinterpret_cast<CUfunction>(function_), grid_[0](state),
+                       grid_[1](state), grid_[2](state), block_[0], block_[1],
+                       block_[2], dynamic_shared_memory_bytes_,
+                       state.cs_.stream_, state.argptr.data(), nullptr));
 
     return;
   } else {
+    for (const auto& grid : grid_) {
+      needs_mod |= grid.RequiresModification();
+    }
     CUgraphNode node = nullptr;
     CUDA_KERNEL_NODE_PARAMS params{};
     params.func = reinterpret_cast<CUfunction>(function_);
-    params.gridDimX = grid_[0];
-    params.gridDimY = grid_[1];
-    params.gridDimZ = grid_[2];
+    params.gridDimX = grid_[0](state);
+    params.gridDimY = grid_[1](state);
+    params.gridDimZ = grid_[2](state);
     params.blockDimX = block_[0];
     params.blockDimY = block_[1];
     params.blockDimZ = block_[2];
@@ -541,6 +857,40 @@ auto KernelNode::operator()(State& state) const {
     priority.priority = priority_;
     LC0EX_CUDA_CHECK(cuGraphKernelNodeSetAttribute(
         node, CU_LAUNCH_ATTRIBUTE_PRIORITY, &priority));
+
+    if (needs_mod) {
+      state.graph_.modifications_.emplace_back([node, cs = &state.cs_,
+                                                batch_size = state.batch_size_,
+                                                persistent =
+                                                    &state.persistent_memory_,
+                                                this](
+                                                   const CudaGraphExec& exec) {
+        absl::InlinedVector<void*, 8> argptr(arguments_.size());
+        absl::InlinedVector<uint64_t, 8> argval(arguments_.size());
+        struct ArgState {
+          decltype(*cs)& cs_;
+          decltype(*persistent)& persistent_memory_;
+          size_t batch_size_;
+        } state{*cs, *persistent, batch_size};
+        for (size_t i = 0; i < arguments_.size(); ++i) {
+          std::visit(
+              [&](auto&& arg) { return arg(argptr[i], argval[i], state); },
+              arguments_[i]);
+        }
+        CUDA_KERNEL_NODE_PARAMS params{};
+        params.func = reinterpret_cast<CUfunction>(function_);
+        params.gridDimX = grid_[0](state);
+        params.gridDimY = grid_[1](state);
+        params.gridDimZ = grid_[2](state);
+        params.blockDimX = block_[0];
+        params.blockDimY = block_[1];
+        params.blockDimZ = block_[2];
+        params.sharedMemBytes = dynamic_shared_memory_bytes_;
+        params.kernelParams = argptr.data();
+
+        LC0EX_CUDA_CHECK(cuGraphExecKernelNodeSetParams(exec, node, &params));
+      });
+    }
     return node;
   }
 }
@@ -639,34 +989,38 @@ auto MemcpyNode<kind>::operator()(State& state) const {
   CUdeviceptr device_ptr = reinterpret_cast<CUdeviceptr>(
       state.cs_.device_memory_.Data() + gpu_offset_);
 
-  constexpr size_t kPolicySize = 1858;
   constexpr size_t kWdlSize = 3;
   constexpr size_t kMlhSize = 1;
   switch (kind) {
+    case MemcpyBuffer::kInputMapping:
+      host_ptr = state.cs_.input_mapping.data();
+      is_h2d = true;
+      bytes = state.cs_.total_legal_moves_ * sizeof(uint32_t);
+      break;
     case MemcpyBuffer::kInputMask:
       host_ptr = state.cs_.input_mask.data();
       is_h2d = true;
-      bytes = state.batch_size * sizeof(uint64_t) * kInputPlanes;
+      bytes = state.batch_size_ * sizeof(uint64_t) * kInputPlanes;
       break;
     case MemcpyBuffer::kInputValue:
       host_ptr = state.cs_.input_value.data();
       is_h2d = true;
-      bytes = state.batch_size * sizeof(ComputeType) * kInputPlanes;
+      bytes = state.batch_size_ * sizeof(ComputeType) * kInputPlanes;
       break;
     case MemcpyBuffer::kOutputsPolicy:
       host_ptr = state.cs_.output_policy.data();
       is_h2d = false;
-      bytes = state.batch_size * sizeof(ComputeType) * kPolicySize;
+      bytes = state.cs_.total_legal_moves_ * sizeof(ComputeType);
       break;
     case MemcpyBuffer::kOutputsWdl:
       host_ptr = state.cs_.output_wdl.data();
       is_h2d = false;
-      bytes = state.batch_size * sizeof(ComputeType) * kWdlSize;
+      bytes = state.batch_size_ * sizeof(ComputeType) * kWdlSize;
       break;
     case MemcpyBuffer::kOutputsMlh:
       host_ptr = state.cs_.output_mlh.data();
       is_h2d = false;
-      bytes = state.batch_size * sizeof(ComputeType) * kMlhSize;
+      bytes = state.batch_size_ * sizeof(ComputeType) * kMlhSize;
       break;
   }
 
@@ -698,6 +1052,39 @@ auto MemcpyNode<kind>::operator()(State& state) const {
     LC0EX_CUDA_CHECK(cuGraphAddMemcpyNode(
         &node, state.graph_, state.dependencies_.data(),
         state.dependencies_.size(), &copy_params, nullptr));
+    if (kind == MemcpyBuffer::kInputMapping) {
+      state.graph_.modifications_.emplace_back(
+          [node, cs = &state.cs_, this](const CudaGraphExec& exec) {
+            size_t total_legal_moves = cs->total_legal_moves_;
+            CUDA_MEMCPY3D copy_params{};
+            copy_params.srcMemoryType = CU_MEMORYTYPE_HOST;
+            copy_params.srcHost = cs->input_mapping.data();
+            copy_params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+            copy_params.dstDevice = reinterpret_cast<CUdeviceptr>(
+                cs->device_memory_.Data() + gpu_offset_);
+            copy_params.WidthInBytes = total_legal_moves * sizeof(uint32_t);
+            copy_params.Height = 1;
+            copy_params.Depth = 1;
+            LC0EX_CUDA_CHECK(cuGraphExecMemcpyNodeSetParams(
+                exec, node, &copy_params, nullptr));
+          });
+    } else if (kind == MemcpyBuffer::kOutputsPolicy) {
+      state.graph_.modifications_.emplace_back(
+          [node, cs = &state.cs_, this](const CudaGraphExec& exec) {
+            size_t total_legal_moves = cs->total_legal_moves_;
+            CUDA_MEMCPY3D copy_params{};
+            copy_params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+            copy_params.srcDevice = reinterpret_cast<CUdeviceptr>(
+                cs->device_memory_.Data() + gpu_offset_);
+            copy_params.dstMemoryType = CU_MEMORYTYPE_HOST;
+            copy_params.dstHost = cs->output_policy.data();
+            copy_params.WidthInBytes = total_legal_moves * sizeof(ComputeType);
+            copy_params.Height = 1;
+            copy_params.Depth = 1;
+            LC0EX_CUDA_CHECK(cuGraphExecMemcpyNodeSetParams(
+                exec, node, &copy_params, nullptr));
+          });
+    }
     return node;
   }
 }
@@ -825,6 +1212,13 @@ CudaProgram::CudaProgram(const pblczero::Program& source,
           std::string_view,
           std::function<void(NodeVector&, const pblczero::Node&)>>
           memcpy_node_creators = {
+              {"/input/policy_mapping",
+               [](NodeVector& nodes, const pblczero::Node& node) {
+                 nodes.emplace_back(
+                     std::in_place_type<
+                         MemcpyNode<MemcpyBuffer::kInputMapping>>,
+                     node);
+               }},
               {"/input/plane_masks",
                [](NodeVector& nodes, const pblczero::Node& node) {
                  nodes.emplace_back(
@@ -878,6 +1272,22 @@ void CudaProgram::Run(State& state) const {
   }
 }
 
+GraphExecModification::GraphExecModification(
+    GraphExecModification&& other) noexcept
+    : modify_func_(std::move(other.modify_func_)) {}
+
+GraphExecModification& GraphExecModification::operator=(
+    GraphExecModification&& other) noexcept {
+  if (this != &other) {
+    modify_func_ = std::move(other.modify_func_);
+  }
+  return *this;
+}
+
+void GraphExecModification::operator()(const CudaGraphExec& exec) const {
+  modify_func_(exec);
+}
+
 GraphCapture::GraphCapture() {
   CUgraph graph = nullptr;
   LC0EX_CUDA_CHECK(cuGraphCreate(&graph, 0));
@@ -885,7 +1295,7 @@ GraphCapture::GraphCapture() {
 }
 
 GraphCapture::GraphCapture(GraphCapture&& other) noexcept
-    : graph_(other.graph_) {
+    : modifications_(std::move(other.modifications_)), graph_(other.graph_) {
   other.graph_ = nullptr;
 }
 
@@ -1020,12 +1430,15 @@ CudaHostMemory::~CudaHostMemory() {
   }
 }
 
-// The CudaGraphExec class implementation. It represents a CUDA graph execution
-// object and provides methods to manage its lifecycle and operations.
-CudaGraphExec::CudaGraphExec(const GraphCapture& graph) {
+// The CudaGraphExec class implementation. It represents a CUDA graph
+// execution object and provides methods to manage its lifecycle and
+// operations.
+CudaGraphExec::CudaGraphExec(GraphCapture& graph)
+    : graph_(graph.release()), modifications_(std::move(graph.modifications_)) {
   CUgraphExec graph_exec = nullptr;
-  LC0EX_CUDA_CHECK(cuGraphInstantiate(
-      &graph_exec, graph, CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY));
+  LC0EX_CUDA_CHECK(
+      cuGraphInstantiate(&graph_exec, reinterpret_cast<CUgraph>(graph_),
+                         CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY));
   graph_exec_ = reinterpret_cast<GraphExec>(graph_exec);
 }
 
@@ -1035,8 +1448,11 @@ void CudaGraphExec::Upload(CudaStream& stream) const {
 }
 
 CudaGraphExec::CudaGraphExec(CudaGraphExec&& other) noexcept
-    : graph_exec_(other.graph_exec_) {
+    : graph_exec_(other.graph_exec_),
+      graph_(other.graph_),
+      modifications_(std::move(other.modifications_)) {
   other.graph_exec_ = nullptr;
+  other.graph_ = nullptr;
 }
 
 CudaGraphExec& CudaGraphExec::operator=(CudaGraphExec&& other) noexcept {
@@ -1044,8 +1460,14 @@ CudaGraphExec& CudaGraphExec::operator=(CudaGraphExec&& other) noexcept {
     if (graph_exec_) {
       LC0EX_CUDA_CHECK(cuGraphExecDestroy(*this));
     }
+    if (graph_) {
+      LC0EX_CUDA_CHECK(cuGraphDestroy(reinterpret_cast<CUgraph>(graph_)));
+    }
+    graph_ = other.graph_;
+    modifications_ = std::move(other.modifications_);
     graph_exec_ = other.graph_exec_;
     other.graph_exec_ = nullptr;
+    other.graph_ = nullptr;
   }
   return *this;
 }
@@ -1053,6 +1475,9 @@ CudaGraphExec& CudaGraphExec::operator=(CudaGraphExec&& other) noexcept {
 CudaGraphExec::~CudaGraphExec() {
   if (graph_exec_) {
     LC0EX_CUDA_CHECK(cuGraphExecDestroy(*this));
+  }
+  if (graph_) {
+    LC0EX_CUDA_CHECK(cuGraphDestroy(reinterpret_cast<CUgraph>(graph_)));
   }
 }
 
@@ -1062,6 +1487,9 @@ CudaGraphExec::operator GraphExecType() const {
 }
 
 void CudaGraphExec::Launch(CudaStream& stream) const {
+  for (const auto& mod : modifications_) {
+    mod(*this);
+  }
   LC0EX_CUDA_CHECK(
       cuGraphLaunch(reinterpret_cast<CUgraphExec>(graph_exec_), stream));
 }

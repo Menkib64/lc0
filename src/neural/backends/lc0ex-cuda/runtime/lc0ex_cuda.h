@@ -153,14 +153,14 @@ class ArgumentNull {
   ArgumentNull() = default;
 
   template <typename State>
-  void operator()(void*& arg, uint64_t& value, const State& state) const;
+  bool operator()(void*& arg, uint64_t& value, const State& state) const;
 };
 class ArgumentSymbol {
  public:
   ArgumentSymbol(void* symbol) : symbol_(symbol) {}
 
   template <typename State>
-  void operator()(void*& arg, uint64_t& value, const State& state) const;
+  bool operator()(void*& arg, uint64_t& value, const State& state) const;
 
  private:
   void* symbol_;
@@ -170,7 +170,7 @@ class ArgumentPersistentBuffer {
   ArgumentPersistentBuffer(size_t offset) : offset_(offset) {}
 
   template <typename State>
-  void operator()(void*& arg, uint64_t& value, const State& state) const;
+  bool operator()(void*& arg, uint64_t& value, const State& state) const;
 
  private:
   size_t offset_;
@@ -180,21 +180,143 @@ class ArgumentExecutionBuffer {
   ArgumentExecutionBuffer(size_t offset) : offset_(offset) {}
 
   template <typename State>
-  void operator()(void*& arg, uint64_t& value, const State& state) const;
+  bool operator()(void*& arg, uint64_t& value, const State& state) const;
 
  private:
   size_t offset_;
 };
-
-class ArgumentVariant
-    : public std::variant<ArgumentNull, ArgumentSymbol,
-                          ArgumentPersistentBuffer, ArgumentExecutionBuffer> {
+enum ArgumentName {
+  kTotalLelgalMoves,
+};
+template <ArgumentName name>
+class ArgumentParameter {
  public:
-  using std::variant<ArgumentNull, ArgumentSymbol, ArgumentPersistentBuffer,
-                     ArgumentExecutionBuffer>::variant;
+  ArgumentParameter() {}
+
+  template <typename State>
+  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+
+ private:
+};
+
+using ArgumentTypes =
+    std::variant<ArgumentNull, ArgumentSymbol, ArgumentPersistentBuffer,
+                 ArgumentExecutionBuffer,
+                 ArgumentParameter<ArgumentName::kTotalLelgalMoves>>;
+
+class ArgumentVariant : public ArgumentTypes {
+ public:
+  using ArgumentTypes::variant;
+};
+
+class OperatorVariant;
+
+using OpVector = absl::InlinedVector<OperatorVariant, 8>;
+
+class Constant {
+ public:
+  Constant(long value) : value_(value) {}
+
+  template <typename State>
+  long operator()(const OpVector& other, State& state) const;
+
+  bool RequiresModification() const {
+    return false;
+  }
+
+ private:
+  long value_;
+};
+
+enum class VariableOpType {
+  kReadBatchSize,
+  kReadTotalLegalMoves,
+};
+
+class VariableOp {
+ public:
+  VariableOp(VariableOpType op) : op_(op) {}
+
+  template <typename State>
+  long operator()(const OpVector& other, State& state) const;
+
+  bool RequiresModification() const {
+    return op_ == VariableOpType::kReadTotalLegalMoves;
+  }
+
+ private:
+  VariableOpType op_;
+};
+
+enum class UnaryOpType {
+  kNegate,
+  kAbs,
+};
+
+class UnaryOp {
+ public:
+  UnaryOp(UnaryOpType op, unsigned idx) : op_(op), idx_(idx) {}
+
+  template <typename State>
+  long operator()(const OpVector& other, State& state) const;
+
+  bool RequiresModification() const {
+    return false;
+  }
+
+ private:
+  UnaryOpType op_;
+  unsigned idx_;
+};
+
+enum class BinaryOpType {
+  kAdd,
+  kSubtract,
+  kMultiply,
+  kDivide,
+};
+
+class BinaryOp {
+ public:
+  BinaryOp(BinaryOpType op, int idx1, int idx2)
+      : op_(op), idx1_(idx1), idx2_(idx2) {}
+
+  template <typename State>
+  long operator()(const OpVector& other, State& state) const;
+
+  bool RequiresModification() const {
+    return false;
+  }
+
+ private:
+  BinaryOpType op_;
+  unsigned idx1_;
+  unsigned idx2_;
+};
+
+using OperatorTypes = std::variant<Constant, BinaryOp, UnaryOp, VariableOp>;
+
+class OperatorVariant : public OperatorTypes {
+ public:
+  using OperatorTypes::variant;
 };
 
 class CudaExecutable;
+
+class GridFormula {
+ public:
+  GridFormula() = default;
+
+  GridFormula& operator=(std::string_view formula);
+
+  template <typename State>
+  unsigned int operator()(State& state) const;
+
+  bool RequiresModification() const;
+
+ private:
+  OpVector operators_;
+};
 
 class KernelNode : public NodeBase {
  public:
@@ -215,7 +337,7 @@ class KernelNode : public NodeBase {
  private:
   absl::InlinedVector<ArgumentVariant, 8> arguments_;
   void* function_ = nullptr;
-  std::array<unsigned int, 3> grid_;
+  std::array<GridFormula, 3> grid_;
   std::array<unsigned int, 3> block_;
   unsigned int dynamic_shared_memory_bytes_ = 0;
 #ifndef _NDEBUG
@@ -256,6 +378,7 @@ class EventWaitNode : public NodeBase {
 };
 
 enum class MemcpyBuffer {
+  kInputMapping,
   kInputMask,
   kInputValue,
   kOutputsPolicy,
@@ -282,6 +405,7 @@ using NodeTypes =
                  EventRecordNode<RecordEventType::kWdlDownloadDone>,
                  EventRecordNode<RecordEventType::kMlhDownloadDone>,
                  EventWaitNode<WaitEventType::kComputeOrdering>,
+                 MemcpyNode<MemcpyBuffer::kInputMapping>,
                  MemcpyNode<MemcpyBuffer::kInputMask>,
                  MemcpyNode<MemcpyBuffer::kInputValue>,
                  MemcpyNode<MemcpyBuffer::kOutputsPolicy>,
@@ -291,6 +415,24 @@ using NodeTypes =
 class NodeVariant : public NodeTypes {
  public:
   using NodeTypes::variant;
+};
+
+class CudaGraphExec;
+
+class GraphExecModification {
+ public:
+  GraphExecModification(std::function<void(const CudaGraphExec&)> modify_func)
+      : modify_func_(std::move(modify_func)) {};
+  GraphExecModification(const GraphExecModification&) = delete;
+  GraphExecModification& operator=(const GraphExecModification&) = delete;
+  GraphExecModification(GraphExecModification&& other) noexcept;
+  GraphExecModification& operator=(GraphExecModification&& other) noexcept;
+  ~GraphExecModification() = default;
+
+  void operator()(const CudaGraphExec& exec) const;
+
+ private:
+  std::function<void(const CudaGraphExec&)> modify_func_;
 };
 
 class GraphCapture {
@@ -304,6 +446,14 @@ class GraphCapture {
 
   template <typename GraphType>
   operator GraphType() const;
+
+  std::vector<GraphExecModification> modifications_;
+
+  Graph release() {
+    Graph g = graph_;
+    graph_ = nullptr;
+    return g;
+  }
 
  private:
   Graph graph_;
@@ -333,7 +483,7 @@ class CudaProgram {
 class CudaGraphExec {
  public:
   CudaGraphExec() = default;
-  CudaGraphExec(const GraphCapture& graph);
+  CudaGraphExec(GraphCapture& graph);
   CudaGraphExec(const CudaGraphExec&) = delete;
   CudaGraphExec& operator=(const CudaGraphExec&) = delete;
   CudaGraphExec(CudaGraphExec&& other) noexcept;
@@ -350,6 +500,8 @@ class CudaGraphExec {
 
  private:
   GraphExec graph_exec_ = nullptr;
+  Graph graph_ = nullptr;
+  std::vector<GraphExecModification> modifications_;
 };
 
 class CudaExecutable {
