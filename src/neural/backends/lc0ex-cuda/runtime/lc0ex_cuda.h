@@ -153,14 +153,18 @@ class ArgumentNull {
   ArgumentNull() = default;
 
   template <typename State>
-  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+  void operator()(void*& arg, uint64_t& value, const State& state) const;
+
+  bool RequiresModification() const { return false; }
 };
 class ArgumentSymbol {
  public:
   ArgumentSymbol(void* symbol) : symbol_(symbol) {}
 
   template <typename State>
-  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+  void operator()(void*& arg, uint64_t& value, const State& state) const;
+
+  bool RequiresModification() const { return false; }
 
  private:
   void* symbol_;
@@ -170,7 +174,9 @@ class ArgumentPersistentBuffer {
   ArgumentPersistentBuffer(size_t offset) : offset_(offset) {}
 
   template <typename State>
-  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+  void operator()(void*& arg, uint64_t& value, const State& state) const;
+
+  bool RequiresModification() const { return false; }
 
  private:
   size_t offset_;
@@ -180,125 +186,58 @@ class ArgumentExecutionBuffer {
   ArgumentExecutionBuffer(size_t offset) : offset_(offset) {}
 
   template <typename State>
-  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+  void operator()(void*& arg, uint64_t& value, const State& state) const;
+
+  bool RequiresModification() const { return false; }
 
  private:
   size_t offset_;
 };
-enum ArgumentName {
-  kTotalLelgalMoves,
-};
-template <ArgumentName name>
-class ArgumentParameter {
- public:
-  ArgumentParameter() {}
 
-  template <typename State>
-  bool operator()(void*& arg, uint64_t& value, const State& state) const;
+class Operator;
 
- private:
-};
+using OpVector = absl::InlinedVector<Operator, 8>;
 
-using ArgumentTypes =
-    std::variant<ArgumentNull, ArgumentSymbol, ArgumentPersistentBuffer,
-                 ArgumentExecutionBuffer,
-                 ArgumentParameter<ArgumentName::kTotalLelgalMoves>>;
-
-class ArgumentVariant : public ArgumentTypes {
- public:
-  using ArgumentTypes::variant;
-};
-
-class OperatorVariant;
-
-using OpVector = absl::InlinedVector<OperatorVariant, 8>;
-
-class Constant {
- public:
-  Constant(long value) : value_(value) {}
-
-  template <typename State>
-  long operator()(const OpVector& other, State& state) const;
-
-  bool RequiresModification() const {
-    return false;
-  }
-
- private:
-  long value_;
-};
-
-enum class VariableOpType {
-  kReadBatchSize,
-  kReadTotalLegalMoves,
-};
-
-class VariableOp {
- public:
-  VariableOp(VariableOpType op) : op_(op) {}
-
-  template <typename State>
-  long operator()(const OpVector& other, State& state) const;
-
-  bool RequiresModification() const {
-    return op_ == VariableOpType::kReadTotalLegalMoves;
-  }
-
- private:
-  VariableOpType op_;
-};
-
-enum class UnaryOpType {
-  kNegate,
-  kAbs,
-};
-
-class UnaryOp {
- public:
-  UnaryOp(UnaryOpType op, unsigned idx) : op_(op), idx_(idx) {}
-
-  template <typename State>
-  long operator()(const OpVector& other, State& state) const;
-
-  bool RequiresModification() const {
-    return false;
-  }
-
- private:
-  UnaryOpType op_;
-  unsigned idx_;
-};
-
-enum class BinaryOpType {
+enum class OperatorType {
+  // Binary operations
   kAdd,
   kSubtract,
   kMultiply,
   kDivide,
+  // Unary operations
+  kNegate,
+  kAbs,
+  // Variable operations
+  kReadBatchSize,
+  kReadTotalLegalMoves,
+  // Constant value
+  kNumber,
 };
 
-class BinaryOp {
+class Operator {
  public:
-  BinaryOp(BinaryOpType op, int idx1, int idx2)
-      : op_(op), idx1_(idx1), idx2_(idx2) {}
+  Operator(OperatorType op, unsigned idx1 = 0, unsigned idx2 = 0)
+      : op_(op), children_{idx1,idx2} {}
+
+  Operator(OperatorType op, long value) : op_(op), value_(value) {}
 
   template <typename State>
   long operator()(const OpVector& other, State& state) const;
 
   bool RequiresModification() const {
-    return false;
+    return op_ == OperatorType::kReadTotalLegalMoves;
   }
 
  private:
-  BinaryOpType op_;
-  unsigned idx1_;
-  unsigned idx2_;
-};
-
-using OperatorTypes = std::variant<Constant, BinaryOp, UnaryOp, VariableOp>;
-
-class OperatorVariant : public OperatorTypes {
- public:
-  using OperatorTypes::variant;
+  struct Children {
+    unsigned idx1_;
+    unsigned idx2_;
+  };
+  OperatorType op_;
+  union {
+    long value_;
+    Children children_;
+  };
 };
 
 class CudaExecutable;
@@ -310,12 +249,34 @@ class GridFormula {
   GridFormula& operator=(std::string_view formula);
 
   template <typename State>
-  unsigned int operator()(State& state) const;
+  long operator()(State& state) const;
 
   bool RequiresModification() const;
 
  private:
   OpVector operators_;
+};
+
+class ArgumentParameter {
+ public:
+  ArgumentParameter(std::string_view formula);
+
+  template <typename State>
+  void operator()(void*& arg, uint64_t& value, const State& state) const;
+
+  bool RequiresModification() const;
+
+ private:
+  OpVector operators_;
+};
+
+using ArgumentTypes =
+    std::variant<ArgumentNull, ArgumentSymbol, ArgumentPersistentBuffer,
+                 ArgumentExecutionBuffer, ArgumentParameter>;
+
+class ArgumentVariant : public ArgumentTypes {
+ public:
+  using ArgumentTypes::variant;
 };
 
 class KernelNode : public NodeBase {
@@ -326,6 +287,8 @@ class KernelNode : public NodeBase {
 
   template <typename State>
   auto operator()(State& state) const;
+
+  bool RequiresModification() const;
 
   void SetDebugState(uint64_t kernel_id, uint64_t node_id) {
 #ifndef _NDEBUG
@@ -510,8 +473,9 @@ class CudaExecutable {
   ~CudaExecutable() = default;
 
   size_t GetPersistentAllocationSize() const;
-  void CopyPersistentFromHost(std::span<const std::byte> source,
-                              std::optional<size_t> size_bytes = std::nullopt) const;
+  void CopyPersistentFromHost(
+      std::span<const std::byte> source,
+      std::optional<size_t> size_bytes = std::nullopt) const;
 
   size_t GetExecutionAllocationSize() const;
   size_t GetExecutionAllocationAlignment() const;

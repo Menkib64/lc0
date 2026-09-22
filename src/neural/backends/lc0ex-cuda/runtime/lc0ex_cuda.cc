@@ -226,53 +226,249 @@ class CaptureState : public LaunchState<T> {
   absl::InlinedVector<CUgraphNode, 4> dependencies_;
 };
 
+// Formula parsing to AST.
+class Lexer {
+ public:
+  explicit Lexer(std::string_view input) : input_(input) {}
+
+  enum TokenType { kIdentifier, kNumber, kOp, kEnd };
+
+  std::tuple<TokenType, std::string_view> NextToken() {
+    SkipWhitespace();
+    if (pos_ >= input_.size()) {
+      return {kEnd, {}};
+    }
+    size_t start = pos_;
+    if (std::isdigit(input_[pos_]) ||
+        (input_[pos_] == '-' && pos_ + 1 < input_.size() &&
+         std::isdigit(input_[pos_ + 1]))) {
+      ++pos_;
+      while (pos_ < input_.size() && std::isdigit(input_[pos_])) {
+        ++pos_;
+      }
+      return {kNumber, input_.substr(start, pos_ - start)};
+    }
+    if (input_[pos_] == '+' || input_[pos_] == '-' || input_[pos_] == '*' ||
+        input_[pos_] == '/' || input_[pos_] == '(' || input_[pos_] == ')') {
+      ++pos_;
+      return {kOp, input_.substr(start, 1)};
+    }
+
+    if (!std::isalpha(input_[pos_]) && input_[pos_] != '_') {
+      throw Exception(
+          "Unexpected character in formula: " + std::string(input_) + " at " +
+          std::to_string(pos_) + ": " + std::string(1, input_[pos_]));
+    }
+
+    while (pos_ < input_.size() &&
+           (std::isalpha(input_[pos_]) || input_[pos_] == '_')) {
+      ++pos_;
+    }
+    return {kIdentifier, input_.substr(start, pos_ - start)};
+  }
+
+  void SkipWhitespace() {
+    while (pos_ < input_.size() && std::isspace(input_[pos_])) {
+      ++pos_;
+    }
+  }
+
+  std::string_view input_;
+  size_t pos_ = 0;
+};
+
+class RecursiveParser {
+ public:
+  explicit RecursiveParser(std::string_view input) : lexer_(input) {}
+
+  unsigned ParseIdentifier(std::string_view identifier) {
+    if (identifier == "total_legal_moves") {
+      result_.emplace_back(OperatorType::kReadTotalLegalMoves);
+      return result_.size() - 1;
+    } else if (identifier == "batch_size") {
+      result_.emplace_back(OperatorType::kReadBatchSize);
+      return result_.size() - 1;
+    } else if (identifier == "abs") {
+      std::tie(token, value) = lexer_.NextToken();
+      if (token != Lexer::kOp || value != "(") {
+        throw Exception("Expected '(' after 'abs' in formula.");
+      }
+      unsigned idx = Parse();
+      if (token != Lexer::kOp || value != ")") {
+        throw Exception("Expected ')' after 'abs' argument in formula.");
+      }
+      result_.emplace_back(OperatorType::kAbs, idx);
+      return result_.size() - 1;
+    } else {
+      throw Exception("Unknown identifier: " + std::string(identifier));
+    }
+  }
+
+  unsigned ParseNumber(std::string_view number) {
+    try {
+      long value = std::stol(std::string(number));
+      result_.emplace_back(OperatorType::kNumber, value);
+      return result_.size() - 1;
+    } catch (const std::exception& e) {
+      throw Exception(
+          "Invalid number in formula: " + std::string(lexer_.input_) + " at " +
+          std::to_string(lexer_.pos_) + std::string(number));
+    }
+  }
+
+  struct BinaryOpPriority {
+    char op;
+    int priority;
+    OperatorType type;
+  };
+
+  static constexpr std::array<BinaryOpPriority, 4> kBinaryOpPriorities = {{
+      {'+', 1, OperatorType::kAdd},
+      {'-', 1, OperatorType::kSubtract},
+      {'*', 2, OperatorType::kMultiply},
+      {'/', 2, OperatorType::kDivide},
+  }};
+
+  unsigned ParseOperator(unsigned left_idx, int priority) {
+    if (token != Lexer::kOp) {
+      return left_idx;
+    }
+    if (value == ")") {
+      return left_idx;
+    }
+    auto iter = std::find_if(
+        kBinaryOpPriorities.begin(), kBinaryOpPriorities.end(),
+        [this](const BinaryOpPriority& op) { return op.op == value[0]; });
+    if (iter == kBinaryOpPriorities.end()) {
+      throw Exception("Unknown binary operator: " + std::string(lexer_.input_) +
+                      " at " + std::to_string(lexer_.pos_) + ": " +
+                      std::string(value));
+    }
+    auto op_type = iter->type;
+    int op_priority = iter->priority;
+    if (op_priority <= priority) {
+      return left_idx;
+    }
+    unsigned right_idx = Parse(op_priority);
+    result_.emplace_back(op_type, left_idx, right_idx);
+    return ParseOperator(result_.size() - 1, priority);
+  }
+
+  unsigned ParseUnaryOperator(std::string_view op) {
+    if (op == "-") {
+      unsigned idx = Parse();
+      if (idx >= result_.size()) {
+        throw Exception(
+            "Invalid index returned from Parse() in unary '-' formula.");
+      }
+      result_.emplace_back(OperatorType::kNegate, idx);
+      return result_.size() - 1;
+    } else if (op == "(") {
+      unsigned idx = Parse();
+      if (token != Lexer::kOp || value != ")") {
+        throw Exception(
+            "Expected ')' after '(': " + std::string(lexer_.input_) + " at " +
+            std::to_string(lexer_.pos_) + ": " + std::string(value));
+      }
+      return idx;
+    } else {
+      throw Exception("Unknown unary operator: " + std::string(lexer_.input_) +
+                      " at " + std::to_string(lexer_.pos_) + ": " +
+                      std::string(op));
+    }
+  }
+
+  unsigned Parse(int priority = 0) {
+    std::tie(token, value) = lexer_.NextToken();
+    unsigned left_idx = 0;
+    switch (token) {
+      case Lexer::kIdentifier:
+        left_idx = ParseIdentifier(value);
+        break;
+      case Lexer::kNumber:
+        left_idx = ParseNumber(value);
+        break;
+      case Lexer::kOp:
+        left_idx = ParseUnaryOperator(value);
+        break;
+      case Lexer::kEnd:
+        throw Exception("Unexpected end: " + std::string(lexer_.input_) +
+                        " at " + std::to_string(lexer_.pos_));
+    }
+    std::tie(token, value) = lexer_.NextToken();
+    return ParseOperator(left_idx, priority);
+  }
+
+  Lexer lexer_;
+  OpVector result_;
+  Lexer::TokenType token;
+  std::string_view value;
+};
+
 // Kernel argument implementation. Each type implements its own kernel argument
 // logic based on the Triton node arguments.
 template <typename State>
-bool ArgumentNull::operator()(void*& arg, std::uint64_t& value,
+void ArgumentNull::operator()(void*& arg, std::uint64_t& value,
                               const State&) const {
   arg = static_cast<void*>(&value);
   value = 0;
-  return false;
 }
 
 template <typename State>
-bool ArgumentSymbol::operator()(void*& arg, std::uint64_t& value,
+void ArgumentSymbol::operator()(void*& arg, std::uint64_t& value,
                                 const State&) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(symbol_);
-  return false;
 }
 
 template <typename State>
-bool ArgumentPersistentBuffer::operator()(void*& arg, std::uint64_t& value,
+void ArgumentPersistentBuffer::operator()(void*& arg, std::uint64_t& value,
                                           const State& state) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(state.persistent_memory_.Data() +
                                           offset_);
-  return false;
 }
 
 template <typename State>
-bool ArgumentExecutionBuffer::operator()(void*& arg, std::uint64_t& value,
+void ArgumentExecutionBuffer::operator()(void*& arg, std::uint64_t& value,
                                          const State& state) const {
   arg = static_cast<void*>(&value);
   value = reinterpret_cast<std::uint64_t>(state.cs_.device_memory_.Data() +
                                           offset_);
-  return false;
 }
 
-template <ArgumentName name>
-template <typename State>
-bool ArgumentParameter<name>::operator()(void*& arg, std::uint64_t& value,
-                                         const State& state) const {
-  arg = static_cast<void*>(&value);
-  switch (name) {
-    case ArgumentName::kTotalLelgalMoves:
-      value = state.cs_.total_legal_moves_;
-      break;
+ArgumentParameter::ArgumentParameter(std::string_view formula) {
+  RecursiveParser parser(formula);
+  unsigned idx = parser.Parse();
+  if (idx >= parser.result_.size()) {
+    throw Exception(
+        "Invalid index returned from Parse(): " + std::string(formula) +
+        " at " + std::to_string(parser.lexer_.pos_) + ": " +
+        std::string(parser.value));
   }
-  return true;
+  if (parser.token != Lexer::kEnd) {
+    throw Exception(
+        "Unexpected token after formula: " + std::string(parser.lexer_.input_) +
+        " at " + std::to_string(parser.lexer_.pos_) + ": " +
+        std::string(parser.value));
+  }
+  operators_ = std::move(parser.result_);
+}
+
+template <typename State>
+void ArgumentParameter::operator()(void*& arg, std::uint64_t& value,
+                                   const State& state) const {
+  arg = static_cast<void*>(&value);
+  value = operators_.back()(operators_, state);
+}
+
+bool ArgumentParameter::RequiresModification() const {
+  for (const auto& op : operators_) {
+    if (op.RequiresModification()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // The CudaStream class implementation. It wraps a CUDA stream and provides
@@ -457,277 +653,82 @@ std::pair<CUdeviceptr, CUdeviceptr> AllocateDeviceMemory(
   return {base, static_cast<CUdeviceptr>(aligned_address)};
 }
 
-class Lexer {
- public:
-  explicit Lexer(std::string_view input) : input_(input) {}
-
-  enum TokenType { kIdentifier, kNumber, kOp, kEnd };
-
-  std::tuple<TokenType, std::string_view> NextToken() {
-    SkipWhitespace();
-    if (pos_ >= input_.size()) {
-      return {kEnd, {}};
-    }
-    size_t start = pos_;
-    if (std::isdigit(input_[pos_]) ||
-        (input_[pos_] == '-' && pos_ + 1 < input_.size() &&
-         std::isdigit(input_[pos_ + 1]))) {
-      ++pos_;
-      while (pos_ < input_.size() && std::isdigit(input_[pos_])) {
-        ++pos_;
-      }
-      return {kNumber, input_.substr(start, pos_ - start)};
-    }
-    if (input_[pos_] == '+' || input_[pos_] == '-' || input_[pos_] == '*' ||
-        input_[pos_] == '/' || input_[pos_] == '(' || input_[pos_] == ')') {
-      ++pos_;
-      return {kOp, input_.substr(start, 1)};
-    }
-
-    if (!std::isalpha(input_[pos_]) && input_[pos_] != '_') {
-      throw Exception(
-          "Unexpected character in formula: " + std::string(input_) + " at " +
-          std::to_string(pos_) + ": " + std::string(1, input_[pos_]));
-    }
-
-    while (pos_ < input_.size() &&
-           (std::isalpha(input_[pos_]) || input_[pos_] == '_')) {
-      ++pos_;
-    }
-    return {kIdentifier, input_.substr(start, pos_ - start)};
-  }
-
-  void SkipWhitespace() {
-    while (pos_ < input_.size() && std::isspace(input_[pos_])) {
-      ++pos_;
-    }
-  }
-
-  std::string_view input_;
-  size_t pos_ = 0;
-};
-
-template <typename T>
-long Constant::operator()(const OpVector&, T&) const {
-  return value_;
-}
-
-template <typename T>
-long VariableOp::operator()(const OpVector&, T& state) const {
-  switch (op_) {
-    case VariableOpType::kReadTotalLegalMoves:
-      return state.cs_.total_legal_moves_;
-    case VariableOpType::kReadBatchSize:
-      return state.batch_size_;
-  }
-  throw Exception("Unknown variable operation.");
-}
-
-template <typename T>
-long UnaryOp::operator()(const OpVector& other, T& state) const {
-  auto value =
-      std::visit([&other, &state](const auto& op) { return op(other, state); },
-                 other[idx_]);
-  switch (op_) {
-    case UnaryOpType::kNegate:
-      return -value;
-    case UnaryOpType::kAbs:
-      return std::abs(value);
-  }
-  throw Exception("Unknown unary operation.");
-}
-
-template <typename T>
-long BinaryOp::operator()(const OpVector& other, T& state) const {
-  auto left =
-      std::visit([&other, &state](const auto& op) { return op(other, state); },
-                 other[idx1_]);
-  auto right =
-      std::visit([&other, &state](const auto& op) { return op(other, state); },
-                 other[idx2_]);
-  switch (op_) {
-    case BinaryOpType::kAdd:
-      return left + right;
-    case BinaryOpType::kSubtract:
-      return left - right;
-    case BinaryOpType::kMultiply:
-      return left * right;
-    case BinaryOpType::kDivide:
-      if (right == 0) {
-        throw Exception("Division by zero in formula.");
-      }
-      return left / right;
-  }
-  throw Exception("Unknown binary operation.");
-}
-
-class RecursiveParser {
- public:
-  explicit RecursiveParser(std::string_view input) : lexer_(input) {}
-
-  unsigned ParseIdentifier(std::string_view identifier) {
-    if (identifier == "total_legal_moves") {
-      result_.emplace_back(std::in_place_type<VariableOp>,
-                           VariableOpType::kReadTotalLegalMoves);
-      return result_.size() - 1;
-    } else if (identifier == "batch_size") {
-      result_.emplace_back(std::in_place_type<VariableOp>,
-                           VariableOpType::kReadBatchSize);
-      return result_.size() - 1;
-    } else if (identifier == "abs") {
-      std::tie(token, value) = lexer_.NextToken();
-      if (token != Lexer::kOp || value != "(") {
-        throw Exception("Expected '(' after 'abs' in formula.");
-      }
-      unsigned idx = Parse();
-      if (token != Lexer::kOp || value != ")") {
-        throw Exception("Expected ')' after 'abs' argument in formula.");
-      }
-      result_.emplace_back(std::in_place_type<UnaryOp>, UnaryOpType::kAbs, idx);
-      return result_.size() - 1;
-    } else {
-      throw Exception("Unknown identifier: " + std::string(identifier));
-    }
-  }
-
-  unsigned ParseNumber(std::string_view number) {
-    try {
-      int value = std::stoi(std::string(number));
-      result_.emplace_back(std::in_place_type<Constant>, value);
-      return result_.size() - 1;
-    } catch (const std::exception& e) {
-      throw Exception(
-          "Invalid number in formula: " + std::string(lexer_.input_) + " at " +
-          std::to_string(lexer_.pos_) + std::string(number));
-    }
-  }
-
-  struct BinaryOpPriority {
-    char op;
-    int priority;
-    BinaryOpType type;
-  };
-
-  static constexpr std::array<BinaryOpPriority, 4> kBinaryOpPriorities = {{
-      {'+', 1, BinaryOpType::kAdd},
-      {'-', 1, BinaryOpType::kSubtract},
-      {'*', 2, BinaryOpType::kMultiply},
-      {'/', 2, BinaryOpType::kDivide},
-  }};
-
-  unsigned ParseOperator(unsigned left_idx, int priority) {
-    if (token != Lexer::kOp) {
-      return left_idx;
-    }
-    if (value == ")") {
-      return left_idx;
-    }
-    auto iter = std::find_if(
-        kBinaryOpPriorities.begin(), kBinaryOpPriorities.end(),
-        [this](const BinaryOpPriority& op) { return op.op == value[0]; });
-    if (iter == kBinaryOpPriorities.end()) {
-      throw Exception("Unknown binary operator: " + std::string(lexer_.input_) +
-                      " at " + std::to_string(lexer_.pos_) + ": " +
-                      std::string(value));
-    }
-    BinaryOpType op_type = iter->type;
-    int op_priority = iter->priority;
-    if (op_priority <= priority) {
-      return left_idx;
-    }
-    unsigned right_idx = Parse(op_priority);
-    result_.emplace_back(std::in_place_type<BinaryOp>, op_type, left_idx,
-                         right_idx);
-    return ParseOperator(result_.size() - 1, priority);
-  }
-
-  unsigned ParseUnaryOperator(std::string_view op) {
-    if (op == "-") {
-      unsigned idx = Parse();
-      if (idx >= result_.size()) {
-        throw Exception(
-            "Invalid index returned from Parse() in unary '-' formula.");
-      }
-      result_.emplace_back(std::in_place_type<UnaryOp>, UnaryOpType::kNegate,
-                           idx);
-      return result_.size() - 1;
-    } else if (op == "(") {
-      unsigned idx = Parse();
-      if (token != Lexer::kOp || value != ")") {
-        throw Exception(
-            "Expected ')' after '(': " + std::string(lexer_.input_) + " at " +
-            std::to_string(lexer_.pos_) + ": " + std::string(value));
-      }
-      return idx;
-    } else {
-      throw Exception("Unknown unary operator: " + std::string(lexer_.input_) +
-                      " at " + std::to_string(lexer_.pos_) + ": " +
-                      std::string(op));
-    }
-  }
-
-  unsigned Parse(int priority = 0) {
-    std::tie(token, value) = lexer_.NextToken();
-    unsigned left_idx = 0;
-    switch (token) {
-      case Lexer::kIdentifier:
-        left_idx = ParseIdentifier(value);
-        break;
-      case Lexer::kNumber:
-        left_idx = ParseNumber(value);
-        break;
-      case Lexer::kOp:
-        left_idx = ParseUnaryOperator(value);
-        break;
-      case Lexer::kEnd:
-        throw Exception("Unexpected end: " + std::string(lexer_.input_) +
-                        " at " + std::to_string(lexer_.pos_));
-    }
-    std::tie(token, value) = lexer_.NextToken();
-    return ParseOperator(left_idx, priority);
-  }
-
-  Lexer lexer_;
-  OpVector result_;
-  Lexer::TokenType token;
-  std::string_view value;
-};
-
 GridFormula& GridFormula::operator=(std::string_view formula) {
   RecursiveParser parser(formula);
   unsigned idx = parser.Parse();
   if (idx >= parser.result_.size()) {
-    throw Exception("Invalid index returned from Parse(): " + std::string(formula) +
-                    " at " + std::to_string(parser.lexer_.pos_) + ": " +
-                    std::string(parser.value));
+    throw Exception(
+        "Invalid index returned from Parse(): " + std::string(formula) +
+        " at " + std::to_string(parser.lexer_.pos_) + ": " +
+        std::string(parser.value));
   }
   if (parser.token != Lexer::kEnd) {
-    throw Exception("Unexpected token after formula: " +
-                    std::string(parser.lexer_.input_) + " at " +
-                    std::to_string(parser.lexer_.pos_) + ": " +
-                    std::string(parser.value));
+    throw Exception(
+        "Unexpected token after formula: " + std::string(parser.lexer_.input_) +
+        " at " + std::to_string(parser.lexer_.pos_) + ": " +
+        std::string(parser.value));
   }
   operators_ = std::move(parser.result_);
   return *this;
 }
 
+template <typename T>
+long Operator::operator()(const OpVector& other, T& state) const {
+  long left, right;
+  switch (op_) {
+    case OperatorType::kAdd:
+    case OperatorType::kSubtract:
+    case OperatorType::kMultiply:
+    case OperatorType::kDivide:
+      right = other[children_.idx2_](other, state);
+    case OperatorType::kNegate:
+    case OperatorType::kAbs:
+      left = other[children_.idx1_](other, state);
+      break;
+    case OperatorType::kReadBatchSize:
+      left = state.batch_size_;
+      break;
+    case OperatorType::kReadTotalLegalMoves:
+      left = state.cs_.total_legal_moves_;
+      break;
+    case OperatorType::kNumber:
+      left = value_;
+      break;
+  }
+  switch (op_) {
+    case OperatorType::kAdd:
+      return left + right;
+    case OperatorType::kSubtract:
+      return left - right;
+    case OperatorType::kMultiply:
+      return left * right;
+    case OperatorType::kDivide:
+      if (right == 0) {
+        throw Exception("Division by zero in formula.");
+      }
+      return left / right;
+    case OperatorType::kNegate:
+      return -left;
+    case OperatorType::kAbs:
+      return std::abs(left);
+    case OperatorType::kReadBatchSize:
+    case OperatorType::kReadTotalLegalMoves:
+    case OperatorType::kNumber:
+      return left;
+  }
+}
+
 template <typename State>
-unsigned int GridFormula::operator()(State& state) const {
+long GridFormula::operator()(State& state) const {
   if (operators_.empty()) {
     throw Exception("GridFormula operators are empty.");
   }
-  auto value = std::visit(
-      [&state, this](const auto& op) { return op(operators_, state); },
-      operators_.back());
-  if (value < 0) {
-    throw Exception("GridFormula evaluated to a negative value.");
-  }
-  return static_cast<unsigned int>(value);
+  return operators_.back()(operators_, state);
 }
 
 bool GridFormula::RequiresModification() const {
   for (const auto& op : operators_) {
-    if (std::visit([](auto& op) { return op.RequiresModification(); }, op)) {
+    if (op.RequiresModification()) {
       return true;
     }
   }
@@ -797,13 +798,9 @@ KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
               throw Exception("Kernel argument allocation kind is unknown.");
           }
         } else if (argument.has_parameter()) {
-          if (argument.parameter().name() == "total_legal_moves") {
             arguments_.emplace_back(
                 std::in_place_type<
-                    ArgumentParameter<ArgumentName::kTotalLelgalMoves>>);
-          } else {
-            throw Exception("Kernel argument parameter name is unknown.");
-          }
+                    ArgumentParameter>, argument.parameter());
         } else {
           throw Exception("Kernel argument is not a symbol, allocation.");
         }
@@ -824,9 +821,8 @@ template <typename State>
 auto KernelNode::operator()(State& state) const {
   state.argval.resize(arguments_.size());
   state.argptr.resize(arguments_.size());
-  bool needs_mod = false;
   for (size_t i = 0; i < arguments_.size(); ++i) {
-    needs_mod |= std::visit(
+    std::visit(
         [&state, i](auto&& arg) {
           return arg(state.argptr[i], state.argval[i], state);
         },
@@ -842,9 +838,6 @@ auto KernelNode::operator()(State& state) const {
 
     return;
   } else {
-    for (const auto& grid : grid_) {
-      needs_mod |= grid.RequiresModification();
-    }
     CUgraphNode node = nullptr;
     CUDA_KERNEL_NODE_PARAMS params{};
     params.func = reinterpret_cast<CUfunction>(function_);
@@ -866,41 +859,55 @@ auto KernelNode::operator()(State& state) const {
     LC0EX_CUDA_CHECK(cuGraphKernelNodeSetAttribute(
         node, CU_LAUNCH_ATTRIBUTE_PRIORITY, &priority));
 
-    if (needs_mod) {
-      state.graph_.modifications_.emplace_back([node, cs = &state.cs_,
-                                                batch_size = state.batch_size_,
-                                                persistent =
-                                                    &state.persistent_memory_,
-                                                this](
-                                                   const CudaGraphExec& exec) {
-        absl::InlinedVector<void*, 8> argptr(arguments_.size());
-        absl::InlinedVector<uint64_t, 8> argval(arguments_.size());
-        struct ArgState {
-          decltype(*cs)& cs_;
-          decltype(*persistent)& persistent_memory_;
-          size_t batch_size_;
-        } state{*cs, *persistent, batch_size};
-        for (size_t i = 0; i < arguments_.size(); ++i) {
-          std::visit(
-              [&](auto&& arg) { return arg(argptr[i], argval[i], state); },
-              arguments_[i]);
-        }
-        CUDA_KERNEL_NODE_PARAMS params{};
-        params.func = reinterpret_cast<CUfunction>(function_);
-        params.gridDimX = grid_[0](state);
-        params.gridDimY = grid_[1](state);
-        params.gridDimZ = grid_[2](state);
-        params.blockDimX = block_[0];
-        params.blockDimY = block_[1];
-        params.blockDimZ = block_[2];
-        params.sharedMemBytes = dynamic_shared_memory_bytes_;
-        params.kernelParams = argptr.data();
+    if (RequiresModification()) {
+      state.graph_.modifications_.emplace_back(
+          [node, cs = &state.cs_, batch_size = state.batch_size_,
+           persistent = &state.persistent_memory_,
+           this](const CudaGraphExec& exec) {
+            absl::InlinedVector<void*, 8> argptr(arguments_.size());
+            absl::InlinedVector<uint64_t, 8> argval(arguments_.size());
+            struct ArgState {
+              decltype(*cs)& cs_;
+              decltype(*persistent)& persistent_memory_;
+              size_t batch_size_;
+            } state{*cs, *persistent, batch_size};
+            for (size_t i = 0; i < arguments_.size(); ++i) {
+              std::visit(
+                  [&](auto&& arg) { return arg(argptr[i], argval[i], state); },
+                  arguments_[i]);
+            }
+            CUDA_KERNEL_NODE_PARAMS params{};
+            params.func = reinterpret_cast<CUfunction>(function_);
+            params.gridDimX = grid_[0](state);
+            params.gridDimY = grid_[1](state);
+            params.gridDimZ = grid_[2](state);
+            params.blockDimX = block_[0];
+            params.blockDimY = block_[1];
+            params.blockDimZ = block_[2];
+            params.sharedMemBytes = dynamic_shared_memory_bytes_;
+            params.kernelParams = argptr.data();
 
-        LC0EX_CUDA_CHECK(cuGraphExecKernelNodeSetParams(exec, node, &params));
-      });
+            LC0EX_CUDA_CHECK(
+                cuGraphExecKernelNodeSetParams(exec, node, &params));
+          });
     }
     return node;
   }
+}
+
+bool KernelNode::RequiresModification() const {
+  for (const auto& arg : arguments_) {
+    if (std::visit([](auto&& arg) { return arg.RequiresModification(); },
+                   arg)) {
+      return true;
+    }
+  }
+  for (const auto& grid : grid_) {
+    if (grid.RequiresModification()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // The EventRecordNode and EventWaitNode classes implementation. They represent

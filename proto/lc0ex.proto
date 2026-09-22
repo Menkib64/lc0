@@ -186,7 +186,7 @@ message Node {
     optional string parameter_name = 1;
     optional AllocationLocation allocation = 2;
     optional Symbol symbol = 3;
-    optional Parameter parameter = 4;
+    optional string parameter = 4;
   }
 
   message Memcpy {
