@@ -395,7 +395,7 @@ class Lc0exPersistentComputation {
   size_t Size() const { return entries_.size(); }
 
   void Clear() {
-    std::fill(total_legal_moves_.begin(), total_legal_moves_.end(), 0);
+    std::fill(total_legal_moves_.begin(), total_legal_moves_.end(), -1);
     entries_.clear();
   }
 
@@ -762,7 +762,7 @@ Lc0exBackendComputation<RuntimeType, ComputeType>::AddInput(
     std::atomic_ref<int> previous_total_legal_moves(
         persistent_->total_legal_moves_[idx - 1]);
     while ((start_legal_moves = previous_total_legal_moves.load(
-                std::memory_order_relaxed)) == 0) {
+                std::memory_order_relaxed)) == -1) {
       SpinloopPause();
     }
   }
@@ -841,6 +841,10 @@ void Lc0exBackendComputation<RuntimeType, ComputeType>::ComputeBlocking() {
   LCTRACE_FUNCTION_SCOPE;
 
   size_t legal_moves = persistent_->total_legal_moves_[actual_batch - 1];
+  if (legal_moves == 0) {
+    legal_moves = 1;
+    persistent_->state_.input_mapping[0] = 0;
+  }
   persistent_->state_.total_legal_moves_ = legal_moves;
 
   if (persistent_->graphs_[actual_batch - 1]) {
