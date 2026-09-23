@@ -785,7 +785,8 @@ KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
                 ALLOCATION_PERSISTENT:
               arguments_.emplace_back(
                   std::in_place_type<ArgumentPersistentBuffer>,
-                  argument.allocation().offset());
+                  argument.allocation().offset(),
+                  argument.allocation().streamed_size());
               break;
             case pblczero::Node::Argument::AllocationLocation::
                 ALLOCATION_EXECUTION:
@@ -798,9 +799,8 @@ KernelNode::KernelNode(const pblczero::Node& source, CudaExecutable& executable,
               throw Exception("Kernel argument allocation kind is unknown.");
           }
         } else if (argument.has_parameter()) {
-            arguments_.emplace_back(
-                std::in_place_type<
-                    ArgumentParameter>, argument.parameter());
+          arguments_.emplace_back(std::in_place_type<ArgumentParameter>,
+                                  argument.parameter());
         } else {
           throw Exception("Kernel argument is not a symbol, allocation.");
         }
@@ -853,6 +853,44 @@ auto KernelNode::operator()(State& state) const {
     LC0EX_CUDA_CHECK(cuGraphAddKernelNode(&node, state.graph_,
                                           state.dependencies_.data(),
                                           state.dependencies_.size(), &params));
+
+    int window_max_size = 0;
+    LC0EX_CUDA_CHECK(cuDeviceGetAttribute(
+        &window_max_size, CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+        0));
+    if (window_max_size > 0) {
+      std::tuple<size_t, size_t> buffer{0, 0};
+
+      for (const auto& arg : arguments_) {
+        std::visit(
+            [&](auto&& arg) {
+              auto b = arg.GetOffsetAndSize();
+              if (std::get<1>(b) > std::get<1>(buffer)) {
+                buffer = b;
+              }
+            },
+            arg);
+      }
+
+      auto [offset, size] = buffer;
+
+      if (size > 0) {
+        CUlaunchAttributeValue policy{};
+        policy.accessPolicyWindow.base_ptr =
+            const_cast<void*>(reinterpret_cast<const void*>(
+                state.persistent_memory_.Data() + offset));
+        policy.accessPolicyWindow.num_bytes =
+            std::min(size, static_cast<size_t>(window_max_size));
+        policy.accessPolicyWindow.hitRatio = 1.0f;
+        policy.accessPolicyWindow.hitProp =
+            CUaccessProperty::CU_ACCESS_PROPERTY_STREAMING;
+        policy.accessPolicyWindow.missProp =
+            CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL;
+
+        LC0EX_CUDA_CHECK(cuGraphKernelNodeSetAttribute(
+            node, CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW, &policy));
+      }
+    }
 
     CUlaunchAttributeValue priority{};
     priority.priority = priority_;

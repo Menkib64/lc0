@@ -156,6 +156,7 @@ class ArgumentNull {
   void operator()(void*& arg, uint64_t& value, const State& state) const;
 
   bool RequiresModification() const { return false; }
+  std::tuple<size_t, size_t> GetOffsetAndSize() const { return {0, 0}; }
 };
 class ArgumentSymbol {
  public:
@@ -165,21 +166,28 @@ class ArgumentSymbol {
   void operator()(void*& arg, uint64_t& value, const State& state) const;
 
   bool RequiresModification() const { return false; }
+  std::tuple<size_t, size_t> GetOffsetAndSize() const { return {0, 0}; }
 
  private:
   void* symbol_;
 };
 class ArgumentPersistentBuffer {
  public:
-  ArgumentPersistentBuffer(size_t offset) : offset_(offset) {}
+  ArgumentPersistentBuffer(size_t offset, size_t streamed_size)
+      : offset_(offset), streamed_size_(streamed_size) {}
 
   template <typename State>
   void operator()(void*& arg, uint64_t& value, const State& state) const;
 
   bool RequiresModification() const { return false; }
 
+  std::tuple<size_t, size_t> GetOffsetAndSize() const {
+    return {offset_, streamed_size_};
+  }
+
  private:
   size_t offset_;
+  size_t streamed_size_ = 0;
 };
 class ArgumentExecutionBuffer {
  public:
@@ -189,6 +197,8 @@ class ArgumentExecutionBuffer {
   void operator()(void*& arg, uint64_t& value, const State& state) const;
 
   bool RequiresModification() const { return false; }
+
+  std::tuple<size_t, size_t> GetOffsetAndSize() const { return {0, 0}; }
 
  private:
   size_t offset_;
@@ -217,7 +227,7 @@ enum class OperatorType {
 class Operator {
  public:
   Operator(OperatorType op, unsigned idx1 = 0, unsigned idx2 = 0)
-      : op_(op), children_{idx1,idx2} {}
+      : op_(op), children_{idx1, idx2} {}
 
   Operator(OperatorType op, long value) : op_(op), value_(value) {}
 
@@ -265,6 +275,7 @@ class ArgumentParameter {
   void operator()(void*& arg, uint64_t& value, const State& state) const;
 
   bool RequiresModification() const;
+  std::tuple<size_t, size_t> GetOffsetAndSize() const { return {0, 0}; }
 
  private:
   OpVector operators_;
