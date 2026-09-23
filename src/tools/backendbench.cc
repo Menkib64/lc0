@@ -102,7 +102,12 @@ void BackendBenchmark::Run() {
 
     classic::NodeTree tree;
     tree.ResetToPosition(option_dict.Get<std::string>(kFenId), {});
-    EvalPosition pos{tree.GetPositionHistory().GetPositions(), {}};
+    auto legal_moves = tree.GetPositionHistory()
+                           .GetPositions()
+                           .back()
+                           .GetBoard()
+                           .GenerateLegalMoves();
+    EvalPosition pos{tree.GetPositionHistory().GetPositions(), legal_moves};
     std::vector<std::thread> handles;
 
     // Do any backend initialization outside the loop.
